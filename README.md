@@ -17,16 +17,13 @@ Follow these steps to run the application on your local machine:
    ```
 
 3. **Configure your secure environment credentials:**
-   * Create a folder named `.streamlit` in the root directory.
-   * Inside that folder, create a file named `secrets.toml`.
-   * Paste your OpenAI API token into the secrets file exactly like this:
-     ```toml
-     OPENAI_API_KEY = "sk-proj-yourActualSecretKeyHere..."
-     ```
+   * Copy `secrets.toml.example` to `.streamlit/secrets.toml` and put your own key in it
+     (or export `OPENAI_API_KEY` in the environment instead).
+   * `.streamlit/secrets.toml` is git-ignored — never commit it.
 
 4. **Launch the Streamlit production server:**
    ```bash
-   streamlit run app.py
+   streamlit run app_app.py
    ```
 
 ## 🏗️ Technical Architecture
@@ -36,4 +33,7 @@ Follow these steps to run the application on your local machine:
 * **Monetization Layer:** Stripe Subscriptions API (Gateway integration ready)
 
 ## 🔒 Security Parameters
-Never check your `.streamlit/secrets.toml` file into public GitHub repositories. Ensure your `.gitignore` file includes `.streamlit/` to protect your API keys from automated scrapers.
+* Never check `.streamlit/secrets.toml` (or any file containing a real key) into the repository; `.gitignore` blocks it.
+* Uploads are limited to JPEG/PNG under 8 MB, are validated with Pillow, and are downscaled and re-encoded before being sent to the model.
+* Model output is rendered as Markdown, never as raw HTML.
+* The plan-tier selector in the sidebar is UI-only. It is not authentication or entitlement enforcement — add server-side auth before charging for tiers.
