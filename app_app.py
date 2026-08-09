@@ -1,8 +1,28 @@
-import streamlit as st
-import io
 import base64
-from PIL import Image
-from openai import OpenAI
+import io
+import logging
+
+import streamlit as st
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    OpenAI,
+    RateLimitError,
+)
+from PIL import Image, UnidentifiedImageError
+
+try:  # Streamlit >= 1.44 raises a dedicated error for absent secrets.
+    from streamlit.errors import StreamlitSecretNotFoundError
+except ImportError:
+    StreamlitSecretNotFoundError = FileNotFoundError
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("agropulse")
 
 st.set_page_config(page_title="AgroPulse.ai - Custom AI Agronomist", layout="wide")
 
@@ -17,10 +37,29 @@ st.markdown("""
 
 # --- SECURE INITIALIZATION ---
 # This looks for your key inside your local file: .streamlit/secrets.toml
+@st.cache_resource
+def get_openai_client() -> OpenAI:
+    api_key = st.secrets["OPENAI_API_KEY"]
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ValueError("OPENAI_API_KEY is present but empty")
+    return OpenAI(api_key=api_key.strip())
+
+
 try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    client = get_openai_client()
+except (KeyError, FileNotFoundError, ValueError, StreamlitSecretNotFoundError) as exc:
+    logger.error("OpenAI client not configured: %s", exc)
+    st.error(
+        "⚠️ Missing or empty OpenAI API key. Add 'OPENAI_API_KEY' to your "
+        "local .streamlit/secrets.toml file."
+    )
+    st.stop()
 except Exception:
-    st.error("⚠️ Missing OpenAI API Key. Please add 'OPENAI_API_KEY' to your local .streamlit/secrets.toml file.")
+    logger.exception("Unexpected failure while initializing the OpenAI client")
+    st.error(
+        "⚠️ Could not initialize the OpenAI client. See the server logs for "
+        "the full traceback."
+    )
     st.stop()
 
 st.title("🌱 AgroPulse.ai — Multi-Model Crop Diagnostic Suite")
@@ -39,9 +78,37 @@ else:
 # --- MAIN IMAGE CAPTURE INTERFACE ---
 uploaded_file = st.file_uploader("Upload leaf or plant image...", type=["jpg", "jpeg", "png"])
 
+def encode_image(image: Image.Image) -> tuple[str, str]:
+    """Return the image as base64 plus the MIME subtype actually encoded."""
+    buffer = io.BytesIO()
+    source_format = (image.format or "JPEG").upper()
+    try:
+        image.save(buffer, format=source_format)
+        encoded_format = source_format
+    except (OSError, ValueError, KeyError) as exc:
+        # Formats such as MPO, or modes such as RGBA/P, cannot always be
+        # re-encoded in their original format; fall back to baseline JPEG.
+        logger.warning("Re-encoding image as JPEG (%s failed: %s)", source_format, exc)
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG")
+        encoded_format = "JPEG"
+
+    mime_subtype = "jpeg" if encoded_format in ("JPEG", "JPG") else encoded_format.lower()
+    return base64.b64encode(buffer.getvalue()).decode("utf-8"), mime_subtype
+
+
 if uploaded_file:
-    img = Image.open(uploaded_file)
-    
+    try:
+        img = Image.open(uploaded_file)
+        img.load()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        logger.warning("Rejected upload %r: %s", uploaded_file.name, exc)
+        st.error(
+            "⚠️ That file could not be read as an image. Please upload a valid "
+            "JPG or PNG photo."
+        )
+        st.stop()
+
     col1, col2 = st.columns([1, 1.3])
     
     with col1:
@@ -52,10 +119,15 @@ if uploaded_file:
         st.subheader("🔬 Deep Learning & Agronomist Scan")
         
         # 1. Prepare raw image bytes and convert to Base64 for the OpenAI Vision API
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format=img.format if img.format else 'JPEG')
-        img_bytes = img_byte_arr.getvalue()
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
+        try:
+            base64_image, mime_subtype = encode_image(img)
+        except Exception:
+            logger.exception("Failed to encode uploaded image %r", uploaded_file.name)
+            st.error(
+                "⚠️ This image could not be prepared for analysis. Try "
+                "re-saving it as a standard JPG or PNG and uploading again."
+            )
+            st.stop()
         
         # 2. Call OpenAI Vision to handle both classification AND solution generation
         with st.spinner("Analyzing plant cells and generating custom agronomist protocol..."):
@@ -87,7 +159,7 @@ if uploaded_file:
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                        "url": f"data:image/{mime_subtype};base64,{base64_image}"
                                     }
                                 }
                             ]
@@ -96,10 +168,52 @@ if uploaded_file:
                     temperature=0.2 
                 )
                 
-                generated_plan = response.choices[0].message.content
-                
+                generated_plan = (
+                    response.choices[0].message.content if response.choices else None
+                )
+                if not generated_plan or not generated_plan.strip():
+                    logger.error(
+                        "OpenAI returned no diagnostic content (response id=%s, "
+                        "finish_reason=%s)",
+                        getattr(response, "id", None),
+                        response.choices[0].finish_reason if response.choices else None,
+                    )
+                    st.error(
+                        "⚠️ The diagnostic layer returned an empty response. "
+                        "Please try again with a clearer photo."
+                    )
+                    st.stop()
+
                 # Display the dynamic diagnostic plan directly inside our styled UI container
                 st.markdown(f'<div class="report-box">{generated_plan}</div>', unsafe_allow_html=True)
-                
-            except Exception as e:
-                st.error(f"Failed to access OpenAI Vision layer: {str(e)}")
+
+            except AuthenticationError:
+                logger.exception("OpenAI rejected the configured API key")
+                st.error(
+                    "⚠️ OpenAI rejected the configured API key. Check "
+                    "'OPENAI_API_KEY' in .streamlit/secrets.toml."
+                )
+            except RateLimitError:
+                logger.exception("OpenAI rate limit or quota exceeded")
+                st.error(
+                    "⚠️ Rate limit or quota exceeded on the OpenAI account. "
+                    "Wait a moment and scan again."
+                )
+            except (APIConnectionError, APITimeoutError):
+                logger.exception("Could not reach the OpenAI API")
+                st.error(
+                    "⚠️ Could not reach OpenAI. Check the server's network "
+                    "connection and try again."
+                )
+            except APIStatusError as exc:
+                logger.exception("OpenAI API returned status %s", exc.status_code)
+                st.error(
+                    f"⚠️ The OpenAI API returned an error (HTTP {exc.status_code}). "
+                    "See the server logs for details."
+                )
+            except Exception:
+                logger.exception("Unexpected failure in the diagnostic pipeline")
+                st.error(
+                    "⚠️ Unexpected failure while generating the diagnosis. See "
+                    "the server logs for the full traceback."
+                )
