@@ -1,8 +1,8 @@
 import streamlit as st
-import io
-import base64
 from PIL import Image
 from openai import OpenAI
+
+from agropulse.core import FREE_TIER, PRO_TIER, diagnose
 
 st.set_page_config(page_title="AgroPulse.ai - Custom AI Agronomist", layout="wide")
 
@@ -28,9 +28,9 @@ st.write("Upload a crop tissue photo to pass it through our Deep Learning comput
 
 # --- SIDEBAR BILLING ENGINE ---
 st.sidebar.title("🚜 Agronomist Portal")
-user_tier = st.sidebar.radio("Select Plan Tier:", ["Free Plan (1 Scan/Day)", "Pro Farmer ($29/mo - Unlimited)"])
+user_tier = st.sidebar.radio("Select Plan Tier:", [FREE_TIER, PRO_TIER])
 
-if user_tier == "Free Plan (1 Scan/Day)":
+if user_tier == FREE_TIER:
     st.sidebar.warning("🔒 Free tier accounts are limited to basic diagnostics.")
     st.sidebar.markdown("[⚡ Upgrade to Pro Farmer via Stripe](https://stripe.com)")
 else:
@@ -51,53 +51,11 @@ if uploaded_file:
     with col2:
         st.subheader("🔬 Deep Learning & Agronomist Scan")
         
-        # 1. Prepare raw image bytes and convert to Base64 for the OpenAI Vision API
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format=img.format if img.format else 'JPEG')
-        img_bytes = img_byte_arr.getvalue()
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        
-        # 2. Call OpenAI Vision to handle both classification AND solution generation
+        # Call OpenAI Vision to handle both classification AND solution generation
         with st.spinner("Analyzing plant cells and generating custom agronomist protocol..."):
             try:
-                system_prompt = "You are a senior plant pathologist and expert commercial agronomist. Provide clean, highly accurate, actionable advice based on images."
-                
-                user_prompt = """
-                Analyze this plant image. Act as a deep learning classifier and tell the farmer exactly what disease or issue you see.
-                
-                Format your final response using this exact clean structure:
-                
-                ### 🔍 Diagnosis: [Write the Plant Name and the Detected Disease/Issue Here]
-                
-                ### 🛑 1. Immediate Field Intervention Strategy
-                (Provide specific spray ratios, organic alternatives, or pruning steps to kill this issue immediately)
-                
-                ### 🚀 2. Accelerated Growth Protocol
-                (Provide exact N-P-K fertilizer shifts, soil remedies, or watering cadences to make this plant grow faster during recovery)
-                """
-                
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",  # Supports extremely accurate image processing
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": user_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    temperature=0.2 
-                )
-                
-                generated_plan = response.choices[0].message.content
-                
+                generated_plan = diagnose(client, img)
+
                 # Display the dynamic diagnostic plan directly inside our styled UI container
                 st.markdown(f'<div class="report-box">{generated_plan}</div>', unsafe_allow_html=True)
                 
