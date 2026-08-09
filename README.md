@@ -29,6 +29,17 @@ Follow these steps to run the application on your local machine:
    streamlit run app.py
    ```
 
+## 🧪 Running the Test Suite
+
+The UI-independent diagnostic logic lives in `agropulse/core.py` and is covered by unit tests:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+`pytest` prints a coverage report for the `agropulse` package (no API key or network access required).
+
 ## 🏗️ Technical Architecture
 * **Frontend UI Engine:** Streamlit Framework
 * **Computer Vision Model:** OpenAI GPT-4o-mini (Vision API layer)
