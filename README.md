@@ -1,11 +1,13 @@
-# 🌾 FarmAI: AI Farming Assistant
+<img width="1408" height="768" alt="image_e1171ee3" src="https://github.com/user-attachments/assets/d830d9ba-9114-4ce8-b8b0-46e22c0c7440" /><img width="1408" height="768" alt="image_5edf3d0d" src="https://github.com/user-attachments/assets/245ec7bf-7d01-431c-8a77-8ec9344726ed" /># 🌾 FarmAI: AI Farming Assistant
+
+### 📊 System Architecture & Data Flow
+(Uploading image_e1171ee3.jpg)
 
 An AI assistant for smallholder farmers in The Gambia and West Africa. Take a photo of a crop leaf to find out what disease it has and how to treat it, check the weather, get crop and yield advice, and ask a farming chatbot, all from a phone-friendly web app.
 
 **[Live demo](https://farmerai-bah-2006.streamlit.ap)** · Built by [Sulayman Bah](https://github.com/bahsulayman689-hash/farmer_AI)
 
-![FarmAI screenshot](ChatGPT Image Aug 21, 2026, 02_02_04 AM.png
-)
+[FarmAI screenshot](Uploading image_5edf3d0d.jpg)
 
 ## Features
 
