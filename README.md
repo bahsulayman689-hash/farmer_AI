@@ -1,39 +1,14 @@
-# 🌱 AgroPulse.ai — Multi-Model Crop Diagnostic Suite
+# FarmAI - AI Farming Assistant
 
-An advanced deep learning and computer vision agritech application built using **Streamlit** and **OpenAI GPT-4o-mini Vision**. This software allows farmers to upload photos of diseased plant tissue to get instant classification diagnoses and custom biochemical growth acceleration remediation plans.
+Features: Disease Detection (your Keras model), Crop Recommendation, Weather Forecast (Open-Meteo, no key),
+Yield Prediction, AI Chatbot (Gemini), History (SQLite).
 
-## 🛠️ Local Installation & Setup
+## Run
+1. Copy `plant_village_model.h5` and `class_indices.json` into this folder.
+2. `pip install -r requirements.txt`
+3. Create `.streamlit/secrets.toml` with: `GEMINI_API_KEY = "your-key"`
+4. `streamlit run app.py`
 
-Follow these steps to run the application on your local machine:
-
-1. **Clone or navigate to the project directory:**
-   ```bash
-   cd your-project-folder
-   ```
-
-2. **Install all required dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure your secure environment credentials:**
-   * Create a folder named `.streamlit` in the root directory.
-   * Inside that folder, create a file named `secrets.toml`.
-   * Paste your OpenAI API token into the secrets file exactly like this:
-     ```toml
-     OPENAI_API_KEY = "sk-proj-yourActualSecretKeyHere..."
-     ```
-
-4. **Launch the Streamlit production server:**
-   ```bash
-   streamlit run app.py
-   ```
-
-## 🏗️ Technical Architecture
-* **Frontend UI Engine:** Streamlit Framework
-* **Computer Vision Model:** OpenAI GPT-4o-mini (Vision API layer)
-* **Image Processor:** Pillow & Base64 binary serialization streams
-* **Monetization Layer:** Stripe Subscriptions API (Gateway integration ready)
-
-## 🔒 Security Parameters
-Never check your `.streamlit/secrets.toml` file into public GitHub repositories. Ensure your `.gitignore` file includes `.streamlit/` to protect your API keys from automated scrapers.
+## Deploy
+Push to GitHub, deploy on Streamlit Community Cloud, add GEMINI_API_KEY under Secrets.
+Large .h5 files over 100 MB need Git LFS.
