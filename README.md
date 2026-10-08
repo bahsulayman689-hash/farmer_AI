@@ -2,9 +2,10 @@
 
 An AI assistant for smallholder farmers in The Gambia and West Africa. Take a photo of a crop leaf to find out what disease it has and how to treat it, check the weather, get crop and yield advice, and ask a farming chatbot, all from a phone-friendly web app.
 
-**[Live demo](YOUR_LIVE_LINK_HERE)** · Built by [Sulayman Bah](https://github.com/bahsulayman689-hash/farmer_AI)
+**[Live demo](https://farmerai-bah-2006.streamlit.ap)** · Built by [Sulayman Bah](https://github.com/bahsulayman689-hash/farmer_AI)
 
-![FarmAI screenshot](screenshots/home.png)
+![FarmAI screenshot](<img width="1536" height="1024" alt="ChatGPT Image Aug 21, 2026, 02_02_04 AM" src="https://github.com/user-attachments/assets/b2ce49b7-f506-4cc9-aa53-2588f4623caa" />
+)
 
 ## Features
 
