@@ -1,5 +1,5 @@
 """FarmAI - AI Farming Assistant (Streamlit). Run: streamlit run app.py"""
-import os, json, re, io, base64, hashlib, sqlite3, html as _h, datetime as dt
+import os, json, re, io, base64, hashlib, time, sqlite3, html as _h, datetime as dt
 import numpy as np
 import requests
 import streamlit as st
@@ -133,6 +133,13 @@ section[data-testid="stSidebar"] div.stButton>button:hover{background:rgba(255,2
 section[data-testid="stSidebar"] div.stButton>button[kind="primary"]{background:#fff;color:#12503A;padding:.58rem .85rem;font-size:1rem;box-shadow:inset 4px 0 0 #E3A72F;}
 section[data-testid="stSidebar"] div.stButton>button[kind="primary"]:hover{background:#fff;color:#12503A;}
 section[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.stButton){margin-bottom:-.35rem;}
+.sb-user{display:flex;gap:.6rem;align-items:center;background:rgba(255,255,255,.09);border-radius:12px;padding:.5rem .6rem;margin-bottom:.4rem;}
+.sb-av{width:30px;height:30px;border-radius:50%;background:#E3A72F;color:#14231B!important;font-weight:800;display:flex;align-items:center;justify-content:center;flex:none;}
+section[data-testid="stSidebar"] .sb-av{color:#14231B;}
+.sb-em{font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+div[data-testid="stFormSubmitButton"]>button{width:100%;border-radius:12px;background:var(--g);color:#fff;border:1px solid var(--g);padding:.75rem 1rem;font-weight:600;font-size:1rem;}
+div[data-testid="stFormSubmitButton"]>button:hover{background:var(--g2);color:#fff;border-color:var(--g2);}
+div[data-testid="stFormSubmitButton"]{width:100%;}
 .sb-sep{height:1px;background:rgba(255,255,255,.14);margin:1rem .3rem .8rem;}
 section[data-testid="stSidebar"] label p{color:#A9C9B6;font-size:.82rem;font-weight:600;}
 section[data-testid="stSidebar"] input,section[data-testid="stSidebar"] div[data-baseweb="select"] *{color:#14231B!important;-webkit-text-fill-color:#14231B!important;}
@@ -142,6 +149,9 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"]{color:#A9C9B
 .sb-stats div{background:rgba(255,255,255,.09);border-radius:12px;padding:.6rem .7rem;font-size:.75rem;color:#A9C9B6;}
 section[data-testid="stSidebar"] .sb-stats b{display:block;font-family:'Bricolage Grotesque',sans-serif;font-size:1.15rem;color:#fff;}
 .sb-foot{font-size:.74rem;color:#7FA38E;padding:.4rem .3rem 0;line-height:1.4;}
+[data-testid="stElementContainer"]:has(>.stButton){width:100%!important;}
+.stButton{width:100%!important;}
+.stButton>button{width:100%!important;}
 /* mobile bottom tab bar */
 .st-key-tabbar{display:none;}
 @media (max-width:768px){
@@ -153,7 +163,7 @@ section[data-testid="stSidebar"] .sb-stats b{display:block;font-family:'Bricolag
  .st-key-tabbar div.stButton>button *{font-size:.8rem;font-weight:700;white-space:nowrap;color:inherit;}
  .st-key-tabbar div.stButton>button:hover{background:var(--gl);color:var(--g);}
  .st-key-tabbar div.stButton>button[kind="primary"]{background:var(--gl);color:var(--g);padding:.6rem .1rem;font-size:.8rem;}
- .block-container{padding-bottom:6.5rem;}
+ .block-container{padding-top:4rem;padding-bottom:6.5rem;}
  [data-testid="stBottom"]{padding-bottom:4rem;}
 }
 @media (max-width:480px){.hero-h{font-size:1.65rem}.wx-temp{font-size:3rem}}
@@ -168,6 +178,82 @@ def bar(p, color="#12503A"): return f'<div class="bar"><span style="width:{max(0
 def level_color(p): return "#1F8A4C" if p >= .8 else "#E3A72F" if p >= .6 else "#C2543B"
 
 # ---------------- Storage (User/Farm data + logs) ----------------
+# Cloud mode: set SUPABASE_URL and SUPABASE_ANON_KEY in secrets. Every farmer signs in and sees only their own rows.
+# Local mode (no secrets): a single-user SQLite file, handy for development.
+def sb_url(): return (get_secret("SUPABASE_URL") or "").rstrip("/")
+def sb_key(): return get_secret("SUPABASE_ANON_KEY") or get_secret("SUPABASE_KEY")
+def sb_on(): return bool(sb_url() and sb_key())
+
+def _auth_call(path, body, params=None):
+    try:
+        r = requests.post(f"{sb_url()}/auth/v1/{path}", params=params, json=body, timeout=15,
+                          headers={"apikey": sb_key(), "Content-Type": "application/json"})
+    except Exception as e:
+        return None, f"Could not reach the server. Check your connection. ({e})"
+    try: d = r.json() if r.text else {}
+    except Exception: d = {}
+    if r.status_code >= 400:
+        return None, d.get("error_description") or d.get("msg") or d.get("message") or d.get("error") or f"Error {r.status_code}"
+    return d, None
+
+def _store_session(d):
+    old = st.session_state.get("auth") or {}
+    u = d.get("user") or {}
+    st.session_state.auth = dict(access=d["access_token"], refresh=d.get("refresh_token") or old.get("refresh"),
+                                 uid=u.get("id") or old.get("uid"), email=u.get("email") or old.get("email"),
+                                 exp=time.time() + int(d.get("expires_in", 3600)))
+    st.session_state["_c"] = {}
+
+def sb_signin(email, pw):
+    d, err = _auth_call("token", {"email": email, "password": pw}, {"grant_type": "password"})
+    if err: return False, err
+    _store_session(d); return True, ""
+
+def sb_signup(email, pw):
+    d, err = _auth_call("signup", {"email": email, "password": pw})
+    if err: return False, err
+    if d.get("access_token"): _store_session(d); return True, ""
+    return False, "CONFIRM"
+
+def sb_recover(email):
+    _, err = _auth_call("recover", {"email": email})
+    return err
+
+def sb_signout():
+    for k in ("auth", "_c", "chat", "pending"): st.session_state.pop(k, None)
+    st.session_state.page = "Home"
+
+def sb_token():
+    """Valid access token, refreshed when close to expiry. None means the farmer must sign in again."""
+    a = st.session_state.get("auth")
+    if not a: return None
+    if a["exp"] - time.time() < 60:
+        d, err = _auth_call("token", {"refresh_token": a.get("refresh")}, {"grant_type": "refresh_token"}) if a.get("refresh") else (None, "x")
+        if d and d.get("access_token"): _store_session(d); a = st.session_state.auth
+        else: st.session_state.pop("auth", None); return None
+    return a["access"]
+
+def sb(method, table, params=None, body=None, prefer=None):
+    """PostgREST call as the signed-in farmer (row-level security does the isolation). Returns None on failure."""
+    tok = sb_token()
+    if not tok: return None
+    h = {"apikey": sb_key(), "Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+    if prefer: h["Prefer"] = prefer
+    try:
+        r = requests.request(method, f"{sb_url()}/rest/v1/{table}", headers=h, params=params, json=body, timeout=15)
+        if r.status_code >= 400: raise RuntimeError(r.text[:200])
+        return r.json() if r.text else []
+    except Exception as e:
+        st.error(f"Could not reach your farm data. Check your connection and try again. ({e})")
+        return None
+
+def _cached(key, fn, ttl=30):
+    c = st.session_state.setdefault("_c", {})
+    hit = c.get(key)
+    if hit and time.time() - hit[0] < ttl: return hit[1]
+    v = fn(); c[key] = (time.time(), v); return v
+def _dirty(): st.session_state["_c"] = {}
+
 def _db():
     c = sqlite3.connect("farmai.db")
     c.execute("create table if not exists history(ts text, kind text, summary text)")
@@ -177,12 +263,20 @@ def _db():
     return c
 
 def log(kind, summary):
-    c = _db(); c.execute("insert into history values (?,?,?)",
-        (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), kind, summary)); c.commit(); c.close()
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    if sb_on(): sb("POST", "history", body={"ts": ts, "kind": kind, "summary": summary}, prefer="return=minimal")
+    else:
+        c = _db(); c.execute("insert into history values (?,?,?)", (ts, kind, summary)); c.commit(); c.close()
+    _dirty()
 
 def recent(n):
-    c = _db(); rows = c.execute("select ts, kind, summary from history order by ts desc limit ?", (n,)).fetchall(); c.close()
-    return rows
+    def load():
+        if sb_on():
+            rows = sb("GET", "history", {"select": "ts,kind,summary", "order": "ts.desc,id.desc", "limit": n}) or []
+            return [(r["ts"], r["kind"], r["summary"]) for r in rows]
+        c = _db(); rows = c.execute("select ts, kind, summary from history order by ts desc limit ?", (n,)).fetchall(); c.close()
+        return rows
+    return _cached(f"recent{n}", load)
 
 KIND_ICON = {"Disease": "🍃", "Crop": "🌱", "Yield": "📈", "Chat": "💬", "Calendar": "📅", "Ledger": "💰"}
 def history_rows(rows):
@@ -353,27 +447,53 @@ SCHEDULE = {  # (days after planting, task type, what to do)
 }
 
 def add_plot(crop, area, soil, planted):
-    c = _db(); c.execute("insert into plots(crop,area,soil,planted) values (?,?,?,?)", (crop, float(area), soil, planted.isoformat())); c.commit(); c.close()
+    if sb_on(): sb("POST", "plots", body={"crop": crop, "area": float(area), "soil": soil, "planted": planted.isoformat()}, prefer="return=minimal")
+    else:
+        c = _db(); c.execute("insert into plots(crop,area,soil,planted) values (?,?,?,?)", (crop, float(area), soil, planted.isoformat())); c.commit(); c.close()
+    _dirty()
     log("Calendar", f"Added {crop} ({float(area):g} ha), planted {planted.strftime('%d %b %Y')}")
     st.toast(f"{crop} added to your crop calendar", icon="📅")
 
 def get_plots():
-    c = _db(); rows = c.execute("select id,crop,area,soil,planted from plots order by planted desc").fetchall(); c.close()
-    return [dict(id=i, crop=cr, area=a, soil=sl, planted=dt.date.fromisoformat(pl)) for i, cr, a, sl, pl in rows]
+    def load():
+        if sb_on():
+            rows = sb("GET", "plots", {"select": "id,crop,area,soil,planted", "order": "planted.desc,id.desc"}) or []
+            return [dict(id=r["id"], crop=r["crop"], area=float(r["area"]), soil=r.get("soil") or "", planted=dt.date.fromisoformat(r["planted"])) for r in rows]
+        c = _db(); rows = c.execute("select id,crop,area,soil,planted from plots order by planted desc").fetchall(); c.close()
+        return [dict(id=i, crop=cr, area=a, soil=sl, planted=dt.date.fromisoformat(pl)) for i, cr, a, sl, pl in rows]
+    return _cached("plots", load)
 
-def done_set(pid):
-    c = _db(); r = {x[0] for x in c.execute("select idx from task_done where plot_id=?", (pid,)).fetchall()}; c.close(); return r
+def _done_all():
+    def load():
+        out = {}
+        if sb_on():
+            for r in sb("GET", "task_done", {"select": "plot_id,idx"}) or []: out.setdefault(r["plot_id"], set()).add(r["idx"])
+        else:
+            c = _db()
+            for pid, idx in c.execute("select plot_id, idx from task_done").fetchall(): out.setdefault(pid, set()).add(idx)
+            c.close()
+        return out
+    return _cached("done", load)
+
+def done_set(pid): return _done_all().get(pid, set())
 
 def toggle_done(pid, idx):
-    c = _db()
-    if c.execute("select 1 from task_done where plot_id=? and idx=?", (pid, idx)).fetchone():
-        c.execute("delete from task_done where plot_id=? and idx=?", (pid, idx))
+    was = idx in done_set(pid)
+    if sb_on():
+        if was: sb("DELETE", "task_done", {"plot_id": f"eq.{pid}", "idx": f"eq.{idx}"})
+        else: sb("POST", "task_done", body={"plot_id": pid, "idx": idx}, prefer="return=minimal,resolution=ignore-duplicates")
     else:
-        c.execute("insert into task_done values (?,?)", (pid, idx))
-    c.commit(); c.close()
+        c = _db()
+        if was: c.execute("delete from task_done where plot_id=? and idx=?", (pid, idx))
+        else: c.execute("insert or ignore into task_done values (?,?)", (pid, idx))
+        c.commit(); c.close()
+    _dirty()
 
 def delete_plot(pid):
-    c = _db(); c.execute("delete from plots where id=?", (pid,)); c.execute("delete from task_done where plot_id=?", (pid,)); c.commit(); c.close()
+    if sb_on(): sb("DELETE", "plots", {"id": f"eq.{pid}"})      # task_done rows go with it (ON DELETE CASCADE)
+    else:
+        c = _db(); c.execute("delete from plots where id=?", (pid,)); c.execute("delete from task_done where plot_id=?", (pid,)); c.commit(); c.close()
+    _dirty()
 
 def plot_tasks(p):
     today = dt.date.today(); done = done_set(p["id"]); out = []
@@ -528,14 +648,66 @@ COST_CATS = ["Seeds", "Fertiliser", "Pesticide", "Labour", "Tools", "Transport",
 SALE_CATS = ["Harvest sale", "Other income"]
 def money(x): return f"D{x:,.0f}"
 def add_entry(kind, crop, cat, amount, note, d):
-    c = _db(); c.execute("insert into ledger(d,kind,crop,cat,amount,note) values (?,?,?,?,?,?)",
-                         (d.isoformat(), kind, crop, cat, float(amount), note.strip())); c.commit(); c.close()
+    if sb_on():
+        sb("POST", "ledger", body={"d": d.isoformat(), "kind": kind, "crop": crop, "cat": cat, "amount": float(amount), "note": note.strip()}, prefer="return=minimal")
+    else:
+        c = _db(); c.execute("insert into ledger(d,kind,crop,cat,amount,note) values (?,?,?,?,?,?)",
+                             (d.isoformat(), kind, crop, cat, float(amount), note.strip())); c.commit(); c.close()
+    _dirty()
     log("Ledger", f"{'Sale' if kind == 'sale' else 'Cost'} {money(amount)}: {crop} {cat.lower()}")
+
 def get_entries():
-    c = _db(); rows = c.execute("select id,d,kind,crop,cat,amount,note from ledger order by d desc, id desc").fetchall(); c.close()
-    return [dict(id=i, d=dt.date.fromisoformat(d), kind=k, crop=cr, cat=ct, amount=a, note=n) for i, d, k, cr, ct, a, n in rows]
+    def load():
+        if sb_on():
+            rows = sb("GET", "ledger", {"select": "id,d,kind,crop,cat,amount,note", "order": "d.desc,id.desc"}) or []
+            return [dict(id=r["id"], d=dt.date.fromisoformat(r["d"]), kind=r["kind"], crop=r["crop"], cat=r["cat"], amount=float(r["amount"]), note=r.get("note") or "") for r in rows]
+        c = _db(); rows = c.execute("select id,d,kind,crop,cat,amount,note from ledger order by d desc, id desc").fetchall(); c.close()
+        return [dict(id=i, d=dt.date.fromisoformat(d), kind=k, crop=cr, cat=ct, amount=a, note=n) for i, d, k, cr, ct, a, n in rows]
+    return _cached("ledger", load)
+
 def del_entry(eid):
-    c = _db(); c.execute("delete from ledger where id=?", (eid,)); c.commit(); c.close()
+    if sb_on(): sb("DELETE", "ledger", {"id": f"eq.{eid}"})
+    else:
+        c = _db(); c.execute("delete from ledger where id=?", (eid,)); c.commit(); c.close()
+    _dirty()
+
+# ---------------- Sign-in screen (cloud mode only) ----------------
+def login_screen():
+    html('<div class="hero"><div class="hero-date">Welcome</div><div class="hero-h">FarmAI</div>'
+         '<div class="hero-p">Sign in to keep your fields, tasks and farm accounts safe and available on any phone.</div></div>')
+    t_in, t_up = st.tabs(["Sign in", "Create account"])
+    with t_in:
+        with st.form("login_form"):
+            e = st.text_input("Email", key="li_email"); p = st.text_input("Password", type="password", key="li_pw")
+            go_in = st.form_submit_button("Sign in")
+        if go_in:
+            if not e.strip() or not p: st.warning("Enter your email and password.")
+            else:
+                ok, msg = sb_signin(e.strip(), p)
+                if ok: st.rerun()
+                else: st.error(msg)
+        with st.expander("Forgot your password?"):
+            fe = st.text_input("Email for the reset link", key="fp_email")
+            if st.button("Send reset link", key="fp_go"):
+                err = sb_recover(fe.strip()) if fe.strip() else "Enter your email first."
+                st.error(err) if err else st.success("Check your email for the reset link.")
+    with t_up:
+        with st.form("signup_form"):
+            e2 = st.text_input("Email", key="su_email"); p2 = st.text_input("Password (at least 6 characters)", type="password", key="su_pw")
+            p3 = st.text_input("Repeat password", type="password", key="su_pw2")
+            go_up = st.form_submit_button("Create account")
+        if go_up:
+            if not e2.strip() or len(p2) < 6: st.warning("Enter your email and a password with at least 6 characters.")
+            elif p2 != p3: st.warning("The two passwords do not match.")
+            else:
+                ok, msg = sb_signup(e2.strip(), p2)
+                if ok: st.rerun()
+                elif msg == "CONFIRM": st.success("Account created. Check your email to confirm it, then sign in.")
+                else: st.error(msg)
+
+if sb_on() and not sb_token():
+    login_screen()
+    st.stop()
 
 # ---------------- Sidebar ----------------
 NAV = [("🏠", "Home", "Home"), ("🍃", "Disease Detection", "Disease Detection"), ("🌱", "Crop Recommendation", "Crop Recommendation"),
@@ -546,6 +718,10 @@ with st.sidebar:
     for ic, target, label in NAV:
         st.button(f"{ic}  {label}", key=f"nav_{target}", on_click=go, args=(target,), type="primary" if page == target else "secondary")
     html('<div class="sb-sep"></div>')
+    if sb_on():
+        _em = st.session_state.auth.get("email") or "Signed in"
+        html(f'<div class="sb-user"><div class="sb-av">{esc(_em[:1].upper())}</div><div class="sb-em">{esc(_em)}</div></div>')
+        st.button("Sign out", key="signout", on_click=sb_signout)
     lang_picker("lang_side")
     _ents = get_entries(); _profit = sum(e["amount"] if e["kind"] == "sale" else -e["amount"] for e in _ents)
     html(f'<div class="sb-stats"><div><b>{len(get_plots())}</b>Plots</div><div><b>{"-" if _profit < 0 else ""}{money(abs(_profit))}</b>Profit</div></div>')
