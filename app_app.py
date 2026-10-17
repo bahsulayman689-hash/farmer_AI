@@ -1,12 +1,12 @@
 """FarmAI - AI Farming Assistant (Streamlit). Run: streamlit run app.py"""
-import os, json, re, io, base64, hashlib, time, sqlite3, html as _h, datetime as dt
+import os, json, re, io, base64, hashlib, time, sqlite3, urllib.parse, html as _h, datetime as dt
 import numpy as np
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-st.set_page_config(page_title="FarmAI", page_icon="FarmerAI Green Tech Logo.png", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="FarmAI", page_icon="🌾", layout="centered", initial_sidebar_state="auto")
 
 # ---------------- Design system ----------------
 CSS = """
@@ -203,6 +203,35 @@ def _store_session(d):
                                  uid=u.get("id") or old.get("uid"), email=u.get("email") or old.get("email"),
                                  exp=time.time() + int(d.get("expires_in", 3600)))
     st.session_state["_c"] = {}
+    if st.session_state.auth.get("refresh"): st.session_state["_cookie_op"] = ("set", st.session_state.auth["refresh"])
+
+# Keep farmers signed in across browser refreshes: the (rotating) refresh token lives in a cookie for 30 days.
+COOKIE = "farmai_rt"
+def _run_js(js):
+    js = f"/*{time.time_ns()}*/" + js          # unique text so the browser runs it every time
+    try: st.html(f"<script>{js}</script>", unsafe_allow_javascript=True)
+    except TypeError: components.html(f"<script>{js}</script>", height=0)      # older Streamlit
+
+def flush_cookie():
+    op = st.session_state.pop("_cookie_op", None)
+    if not op: return
+    base = "const D=(window.parent&&window.parent!==window?window.parent.document:document);"      # runs inside its own function scope
+    if op[0] == "set":
+        val = json.dumps(op[1]).replace("<", "\\u003c")
+        _run_js("(function(){" + base + f'D.cookie="{COOKIE}="+encodeURIComponent({val})+"; max-age=2592000; path=/; SameSite=Lax"+(location.protocol==="https:"?"; Secure":"");' + "})();")
+    else:
+        _run_js("(function(){" + base + f'D.cookie="{COOKIE}=; max-age=0; path=/; SameSite=Lax";' + "})();")
+
+def try_restore():
+    """First run of a browser session: turn the saved cookie back into a signed-in session."""
+    if "auth" in st.session_state or st.session_state.get("_restore_done"): return
+    st.session_state["_restore_done"] = True
+    try: rt = st.context.cookies.get(COOKIE)
+    except Exception: rt = None
+    if not rt: return
+    d, err = _auth_call("token", {"refresh_token": urllib.parse.unquote(rt)}, {"grant_type": "refresh_token"})
+    if d and d.get("access_token"): _store_session(d)
+    else: st.session_state["_cookie_op"] = ("clear", None)
 
 def sb_signin(email, pw):
     d, err = _auth_call("token", {"email": email, "password": pw}, {"grant_type": "password"})
@@ -220,7 +249,12 @@ def sb_recover(email):
     return err
 
 def sb_signout():
+    a = st.session_state.get("auth") or {}
+    if a.get("access"):          # best effort: revoke the session on the server
+        try: requests.post(f"{sb_url()}/auth/v1/logout", headers={"apikey": sb_key(), "Authorization": f"Bearer {a['access']}"}, timeout=10)
+        except Exception: pass
     for k in ("auth", "_c", "chat", "pending"): st.session_state.pop(k, None)
+    st.session_state["_cookie_op"] = ("clear", None)
     st.session_state.page = "Home"
 
 def sb_token():
@@ -705,8 +739,11 @@ def login_screen():
                 elif msg == "CONFIRM": st.success("Account created. Check your email to confirm it, then sign in.")
                 else: st.error(msg)
 
+if sb_on():
+    try_restore()
 if sb_on() and not sb_token():
     login_screen()
+    flush_cookie()
     st.stop()
 
 # ---------------- Sidebar ----------------
@@ -1052,3 +1089,5 @@ elif page == "History":
         st.button("Scan a leaf", on_click=go, args=("Disease Detection",), type="primary", key="empty_cta")
     else:
         history_rows(rows)
+
+flush_cookie()
