@@ -6,7 +6,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-st.set_page_config(page_title="FarmAI", page_icon="🌾", layout="centered", initial_sidebar_state="auto")
+st.set_page_config(page_title="FarmAI", page_icon="FarmerAI Green Tech Logo.png", layout="wide", initial_sidebar_state="auto")
 
 # ---------------- Design system ----------------
 CSS = """
