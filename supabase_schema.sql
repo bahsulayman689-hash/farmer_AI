@@ -57,3 +57,20 @@ create policy "own rows" on public.plots     for all to authenticated using (use
 create policy "own rows" on public.task_done for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "own rows" on public.ledger    for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "own rows" on public.history   for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ---------------------------------------------------------------------------
+-- Reminders: one profile row per farmer (phone, channel, location, language).
+-- ---------------------------------------------------------------------------
+create table if not exists public.profiles (
+  user_id    uuid primary key default auth.uid() references auth.users(id) on delete cascade,
+  phone      text not null default '',
+  channel    text not null default 'whatsapp' check (channel in ('whatsapp', 'sms')),
+  location   text not null default 'Banjul',
+  lang       text not null default 'English',
+  reminders  boolean not null default false,
+  last_sent  date,
+  updated_at timestamptz not null default now()
+);
+alter table public.profiles enable row level security;
+drop policy if exists "own rows" on public.profiles;
+create policy "own rows" on public.profiles for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());

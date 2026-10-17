@@ -1,0 +1,5 @@
+.streamlit/secrets.toml
+farmai.db
+__pycache__/
+*.pyc
+.venv

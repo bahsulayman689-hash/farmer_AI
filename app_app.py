@@ -193,7 +193,10 @@ def _auth_call(path, body, params=None):
     try: d = r.json() if r.text else {}
     except Exception: d = {}
     if r.status_code >= 400:
-        return None, d.get("error_description") or d.get("msg") or d.get("message") or d.get("error") or f"Error {r.status_code}"
+        msg = d.get("error_description") or d.get("msg") or d.get("message") or d.get("error") or f"Error {r.status_code}"
+        if "rate limit" in msg.lower() or d.get("error_code") == "over_email_send_rate_limit":
+            msg = "Too many emails were sent just now. Please wait about an hour and try again. If you run this app, turn off 'Confirm email' in Supabase or add your own SMTP sender."
+        return None, msg
     return d, None
 
 def _store_session(d):
@@ -457,28 +460,7 @@ page = st.session_state.page
 
 # ---------------- Crop calendar ----------------
 TASK_ICON = {"plant": "🌱", "weed": "🌿", "fert": "🧪", "spray": "💧", "water": "🚰", "harvest": "🧺"}
-SCHEDULE = {  # (days after planting, task type, what to do)
-    "Rice": [(0,"plant","Transplant seedlings into a levelled, puddled field"),(14,"weed","First weeding and fill gaps"),(21,"fert","Apply basal NPK"),
-             (45,"fert","Top-dress with nitrogen at tillering"),(50,"weed","Second weeding, keep water about 5 cm deep"),(75,"spray","Scout for blast and stem borers"),
-             (105,"water","Drain the field 10 days before harvest"),(120,"harvest","Harvest when most grains are golden")],
-    "Maize": [(0,"plant","Plant seeds 25 cm apart in rows"),(10,"weed","Thin to one plant per stand and fill gaps"),(14,"weed","First weeding"),
-              (21,"fert","Apply NPK basal dose"),(40,"fert","Top-dress with urea and earth up"),(45,"weed","Second weeding"),
-              (60,"spray","Check whorls for fall armyworm"),(100,"harvest","Harvest when husks are dry")],
-    "Tomato": [(0,"plant","Transplant seedlings and water well"),(10,"water","Stake plants and mulch the soil"),(14,"fert","Apply NPK after establishment"),
-               (21,"weed","First weeding"),(35,"fert","Top-dress with potassium-rich fertiliser"),(40,"spray","Scout for early and late blight"),
-               (60,"spray","Check for fruit borer and whitefly"),(90,"harvest","Start harvesting ripe fruit")],
-    "Groundnut": [(0,"plant","Sow seeds 10 cm apart in rows"),(14,"weed","First weeding"),(30,"weed","Second weeding and light earthing up"),
-                  (40,"fert","Apply gypsum at flowering"),(60,"spray","Scout for leaf spot and rosette virus"),
-                  (100,"water","Stop watering and check pod maturity"),(110,"harvest","Lift plants and dry pods in the sun")],
-    "Millet": [(0,"plant","Sow seeds in rows or hills"),(14,"weed","Thin seedlings and weed"),(21,"fert","Apply manure or NPK"),
-               (40,"weed","Second weeding"),(60,"spray","Scout for downy mildew and stem borers"),(90,"harvest","Harvest when heads are hard and dry")],
-    "Cassava": [(0,"plant","Plant stem cuttings in ridges or mounds"),(30,"weed","First weeding"),(60,"fert","Apply NPK rich in potassium"),
-                (90,"weed","Second weeding"),(150,"spray","Scout for mosaic disease and mealybugs"),(270,"harvest","Harvest roots as leaves start to yellow")],
-    "Sorghum": [(0,"plant","Sow seeds in rows"),(14,"weed","Thin to 2-3 plants per stand and weed"),(21,"fert","Apply NPK or manure"),
-                (45,"weed","Second weeding"),(65,"spray","Scout for head bugs and shoot fly"),(95,"water","Protect heads from birds"),(110,"harvest","Harvest when grain is hard")],
-    "Cowpea": [(0,"plant","Sow seeds in rows"),(14,"weed","First weeding"),(28,"spray","Check for aphids and pod borers"),
-               (40,"weed","Second weeding"),(55,"spray","Spray if pod borers appear"),(70,"harvest","Harvest dry pods in batches")],
-}
+from farm_data import SCHEDULE, compute_tasks, build_message   # shared with reminders.py
 
 def add_plot(crop, area, soil, planted):
     if sb_on(): sb("POST", "plots", body={"crop": crop, "area": float(area), "soil": soil, "planted": planted.isoformat()}, prefer="return=minimal")
@@ -530,15 +512,7 @@ def delete_plot(pid):
     _dirty()
 
 def plot_tasks(p):
-    today = dt.date.today(); done = done_set(p["id"]); out = []
-    for idx, (off, kind, text) in enumerate(SCHEDULE[p["crop"]]):
-        due = p["planted"] + dt.timedelta(days=off)
-        if idx in done or (kind == "plant" and due <= today): status = "done"
-        elif due < today: status = "late"
-        elif due <= today + dt.timedelta(days=2): status = "due"
-        else: status = "up"
-        out.append(dict(idx=idx, due=due, kind=kind, text=text, status=status))
-    return out
+    return compute_tasks(p["crop"], p["planted"], done_set(p["id"]))
 
 def task_label(t):
     d = (t["due"] - dt.date.today()).days
@@ -705,6 +679,25 @@ def del_entry(eid):
         c = _db(); c.execute("delete from ledger where id=?", (eid,)); c.commit(); c.close()
     _dirty()
 
+def normalize_phone(raw):
+    """Return +E164 or None. Accepts +220..., 00220... or a 7-digit Gambian number."""
+    p = re.sub(r"[\s\-()]", "", raw or "")
+    if p.startswith("00"): p = "+" + p[2:]
+    if re.fullmatch(r"\d{7}", p): p = "+220" + p
+    return p if re.fullmatch(r"\+\d{8,15}", p) else None
+
+def get_profile():
+    def load():
+        rows = sb("GET", "profiles", {"select": "phone,channel,location,lang,reminders", "limit": 1}) or [] if sb_on() else []
+        return rows[0] if rows else {}
+    return _cached("profile", load)
+
+def save_profile(p):
+    if not sb_on(): return
+    body = {**p, "user_id": st.session_state.auth["uid"], "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    sb("POST", "profiles", params={"on_conflict": "user_id"}, body=body, prefer="resolution=merge-duplicates,return=minimal")
+    _dirty()
+
 # ---------------- Sign-in screen (cloud mode only) ----------------
 def login_screen():
     html('<div class="hero"><div class="hero-date">Welcome</div><div class="hero-h">FarmAI</div>'
@@ -749,7 +742,7 @@ if sb_on() and not sb_token():
 # ---------------- Sidebar ----------------
 NAV = [("🏠", "Home", "Home"), ("🍃", "Disease Detection", "Disease Detection"), ("🌱", "Crop Recommendation", "Crop Recommendation"),
        ("⛅", "Weather Forecast", "Weather Forecast"), ("📈", "Yield Prediction", "Yield Prediction"), ("📅", "Crop Calendar", "Crop Calendar"),
-       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🕘", "History", "History")]
+       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🔔", "Reminders", "Reminders"), ("🕘", "History", "History")]
 with st.sidebar:
     html('<div class="sb-brand"><div class="sb-logo">🌾</div><div><div class="sb-name">FarmAI</div><div class="sb-tag">Smart farming for The Gambia</div></div></div>')
     for ic, target, label in NAV:
@@ -1020,6 +1013,37 @@ elif page == "Season Ledger":
                      f'<span style="color:{"#17703A" if sale else "#A63A22"}">{"+" if sale else "-"}{money(e["amount"])}</span>'
                      f'<div class="tm">{e["d"].strftime("%d %b %Y")}{" · " + esc(e["note"]) if e["note"] else ""}</div></div></div>')
             cx.button("✕", key=f"le_del{e['id']}", on_click=del_entry, args=(e["id"],))
+
+elif page == "Reminders":
+    header("🔔", "Reminders", "A WhatsApp or SMS each morning with your tasks and rain alerts.")
+    if not sb_on():
+        st.info("Reminders need an account. Set SUPABASE_URL and SUPABASE_ANON_KEY so farmers can sign in, then come back here.")
+    else:
+        prof = get_profile()
+        with st.container(border=True):
+            ph = st.text_input("Phone number", prof.get("phone") or "", placeholder="+220 7XX XXXX", key="rm_phone")
+            ch_l = st.radio("Send by", ["WhatsApp", "SMS"], index=0 if prof.get("channel", "whatsapp") == "whatsapp" else 1, horizontal=True, key="rm_ch")
+            loc = st.text_input("Farm location (for rain alerts)", prof.get("location") or "Banjul", key="rm_loc")
+            lg = st.selectbox("Language", LANGS, index=LANGS.index(prof["lang"]) if prof.get("lang") in LANGS else 0, key="rm_lang")
+            on = st.toggle("Send me a reminder every morning", value=bool(prof.get("reminders")), key="rm_on")
+            help_txt = get_secret("REMINDER_HELP")
+            if ch_l == "WhatsApp" and help_txt: st.caption(help_txt)
+            if st.button("Save reminders", type="primary", key="rm_save"):
+                num = normalize_phone(ph)
+                if on and not num: st.warning("Enter a valid phone number, for example +220 7XX XXXX.")
+                else:
+                    save_profile(dict(phone=num or "", channel="whatsapp" if ch_l == "WhatsApp" else "sms", location=loc.strip() or "Banjul", lang=lg, reminders=bool(on and num)))
+                    st.success("Saved. Your first reminder arrives tomorrow morning." if on else "Saved. Reminders are off.")
+        html('<div class="sec">What your next message looks like</div>')
+        rain = None
+        try:
+            wd = fetch_weather(loc)
+            if wd: rain = max(wd[1]["daily"]["precipitation_probability_max"][:2])
+        except Exception: pass
+        msg = build_message([dict(crop=p["crop"], planted=p["planted"], done=done_set(p["id"])) for p in get_plots()], rain)
+        if msg: html(f'<div class="card" style="white-space:pre-line;font-size:.95rem">{esc(msg)}</div>')
+        else: html('<div class="card"><div class="res-c" style="margin:0">Nothing is due today or tomorrow, so no message would be sent. Add a field in the Crop Calendar to start.</div></div>')
+        st.caption("Messages are sent once a day, and only when you have something to do.")
 
 elif page == "Ask AI":
     header("💬", "Farming AI", "Ask about pests, soil, planting or harvest.")
