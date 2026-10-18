@@ -6,7 +6,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-st.set_page_config(page_title="FarmAI", page_icon="🌾", layout="centered", initial_sidebar_state="auto")
+st.set_page_config(page_title="FarmAI", page_icon="FarmerAI Green Tech Logo.png", layout="wide", initial_sidebar_state="auto")
 
 # ---------------- Design system ----------------
 CSS = """
@@ -129,6 +129,8 @@ section[data-testid="stSidebar"] .sb-name{font-family:'Bricolage Grotesque',sans
 section[data-testid="stSidebar"] .sb-tag{font-size:.78rem;color:#A9C9B6;margin-top:2px;}
 section[data-testid="stSidebar"] div.stButton>button{background:transparent;border:0;color:#D3E6DA;justify-content:flex-start;text-align:left;padding:.58rem .85rem;border-radius:12px;font-weight:600;box-shadow:none;}
 section[data-testid="stSidebar"] div.stButton>button *{color:inherit;text-align:left;}
+section[data-testid="stSidebar"] div.stButton>button>div{justify-content:flex-start!important;width:100%;}
+section[data-testid="stSidebar"] div.stButton>button p{text-align:left!important;width:100%;}
 section[data-testid="stSidebar"] div.stButton>button:hover{background:rgba(255,255,255,.1);color:#fff;border:0;}
 section[data-testid="stSidebar"] div.stButton>button[kind="primary"]{background:#fff;color:#12503A;padding:.58rem .85rem;font-size:1rem;box-shadow:inset 4px 0 0 #E3A72F;}
 section[data-testid="stSidebar"] div.stButton>button[kind="primary"]:hover{background:#fff;color:#12503A;}
@@ -140,6 +142,12 @@ section[data-testid="stSidebar"] .sb-av{color:#14231B;}
 div[data-testid="stFormSubmitButton"]>button{width:100%;border-radius:12px;background:var(--g);color:#fff;border:1px solid var(--g);padding:.75rem 1rem;font-weight:600;font-size:1rem;}
 div[data-testid="stFormSubmitButton"]>button:hover{background:var(--g2);color:#fff;border-color:var(--g2);}
 div[data-testid="stFormSubmitButton"]{width:100%;}
+.tbl-wrap{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:.3rem .6rem;margin:.4rem 0 .8rem;}
+.tbl{width:100%;border-collapse:collapse;font-size:.92rem;}
+.tbl,.tbl th,.tbl td{border:none!important;background:transparent;}
+.tbl th{text-align:left;color:var(--mut);font-weight:600;font-size:.8rem;padding:.55rem .5rem;white-space:nowrap;}
+.tbl td{padding:.6rem .5rem;border-top:1px solid var(--line)!important;white-space:nowrap;}
+.code{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:2.2rem;letter-spacing:.18em;color:var(--g);}
 .sb-sep{height:1px;background:rgba(255,255,255,.14);margin:1rem .3rem .8rem;}
 section[data-testid="stSidebar"] label p{color:#A9C9B6;font-size:.82rem;font-weight:600;}
 section[data-testid="stSidebar"] input,section[data-testid="stSidebar"] div[data-baseweb="select"] *{color:#14231B!important;-webkit-text-fill-color:#14231B!important;}
@@ -270,7 +278,7 @@ def sb_token():
         else: st.session_state.pop("auth", None); return None
     return a["access"]
 
-def sb(method, table, params=None, body=None, prefer=None):
+def sb(method, table, params=None, body=None, prefer=None, quiet=False):
     """PostgREST call as the signed-in farmer (row-level security does the isolation). Returns None on failure."""
     tok = sb_token()
     if not tok: return None
@@ -278,11 +286,18 @@ def sb(method, table, params=None, body=None, prefer=None):
     if prefer: h["Prefer"] = prefer
     try:
         r = requests.request(method, f"{sb_url()}/rest/v1/{table}", headers=h, params=params, json=body, timeout=15)
-        if r.status_code >= 400: raise RuntimeError(r.text[:200])
+        if r.status_code >= 400:
+            try: msg = r.json().get("message") or r.text[:200]
+            except Exception: msg = r.text[:200]
+            raise RuntimeError(msg)
+        st.session_state.pop("_sb_err", None)
         return r.json() if r.text else []
     except Exception as e:
-        st.error(f"Could not reach your farm data. Check your connection and try again. ({e})")
+        st.session_state["_sb_err"] = str(e)
+        if not quiet: st.error(f"Could not reach your farm data. Check your connection and try again. ({e})")
         return None
+
+def sb_rpc(fn, body=None, quiet=False): return sb("POST", f"rpc/{fn}", body=body or {}, quiet=quiet)
 
 def _cached(key, fn, ttl=30):
     c = st.session_state.setdefault("_c", {})
@@ -688,7 +703,7 @@ def normalize_phone(raw):
 
 def get_profile():
     def load():
-        rows = sb("GET", "profiles", {"select": "phone,channel,location,lang,reminders", "limit": 1}) or [] if sb_on() else []
+        rows = sb("GET", "profiles", {"select": "phone,channel,location,lang,reminders,name", "limit": 1}) or [] if sb_on() else []
         return rows[0] if rows else {}
     return _cached("profile", load)
 
@@ -697,6 +712,113 @@ def save_profile(p):
     body = {**p, "user_id": st.session_state.auth["uid"], "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     sb("POST", "profiles", params={"on_conflict": "user_id"}, body=body, prefer="resolution=merge-duplicates,return=minimal")
     _dirty()
+
+# ---------------- Cooperatives ----------------
+def get_my_coop():
+    def load():
+        rows = sb_rpc("my_cooperative") or []
+        return rows[0] if isinstance(rows, list) and rows else {}
+    return _cached("mycoop", load)
+
+def join_coop(code):
+    res = sb_rpc("join_cooperative", {"p_code": code.strip()}, quiet=True); _dirty(); return res
+def set_sharing(on): sb_rpc("set_coop_sharing", {"p_share": bool(on)}); _dirty()
+def leave_coop(): sb_rpc("leave_cooperative"); _dirty()
+
+def get_owned_coops():
+    return _cached("owned", lambda: sb("GET", "cooperatives", {"select": "id,name,join_code", "order": "id"}) or [])
+def create_coop(name):
+    sb("POST", "cooperatives", body={"name": name.strip()}, prefer="return=minimal"); _dirty()
+def new_code(cid): sb_rpc("coop_new_code", {"p_coop": cid}); _dirty()
+def remove_member(uid): sb_rpc("coop_remove_member", {"p_user": uid}); _dirty()
+
+def coop_dashboard(coop):
+    members = _cached("c_members", lambda: sb_rpc("coop_members_list") or [])
+    fields = _cached("c_fields", lambda: sb_rpc("coop_fields") or [])
+    done = _cached("c_done", lambda: sb_rpc("coop_done") or [])
+    scans = _cached("c_scans", lambda: sb_rpc("coop_scans", {"p_days": 30}) or [])
+    today = dt.date.today(); week_ago = (today - dt.timedelta(days=7)).isoformat()
+    who = {m["user_id"]: m for m in members}
+    done_by = {}
+    for d in done: done_by.setdefault(d["plot_id"], set()).add(d["idx"])
+    ha = sum(float(f["area"]) for f in fields)
+    active = sum(1 for m in members if (m.get("last_active") or "") >= week_ago)
+
+    html(f'<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">'
+         f'<div><div class="plot-m">Cooperative</div><div class="res-t" style="margin:.1rem 0 0">{esc(coop["name"])}</div>'
+         f'<div class="plot-m">Farmers join with this code in the Cooperative page</div></div><div class="code">{esc(coop["join_code"])}</div></div>')
+    html(f'<div class="stats"><div class="stat hi"><small>Farmers sharing</small><div class="v">{len(members)}</div><div class="s">{active} active this week</div></div>'
+         f'<div class="stat"><small>Fields</small><div class="v">{len(fields)}</div></div>'
+         f'<div class="stat"><small>Hectares</small><div class="v">{ha:.1f}</div></div></div>')
+    if not members:
+        html('<div class="card"><div class="res-c" style="margin:0">No farmers have joined yet. Share the code above. Farmers choose what to share, and you only see the fields and scans of those who agree.</div></div>')
+        return
+
+    # crop mix
+    mix = {}
+    for f in fields:
+        m = mix.setdefault(f["crop"], [0, 0.0]); m[0] += 1; m[1] += float(f["area"])
+    html('<div class="sec">What is planted</div>')
+    top = max((v[1] for v in mix.values()), default=1) or 1
+    rows = "".join(f'<div style="margin:.55rem 0"><div class="conf"><span>{CROPS[c]["e"] if c in CROPS else "🌾"} {esc(c)}</span><span>{v[1]:.1f} ha · {v[0]} field{"s" if v[0] != 1 else ""}</span></div>{bar(v[1] / top, "#1F8A4C")}</div>'
+                   for c, v in sorted(mix.items(), key=lambda kv: -kv[1][1]))
+    html(f'<div class="card">{rows or "<div class=res-c>No fields yet.</div>"}</div>')
+
+    # work coming up
+    due = late = 0; upcoming = {}
+    for f in fields:
+        if f["crop"] not in SCHEDULE: continue
+        for t in compute_tasks(f["crop"], dt.date.fromisoformat(f["planted"]), done_by.get(f["plot_id"], set()), today):
+            if t["status"] == "due": due += 1; upcoming[t["text"]] = upcoming.get(t["text"], 0) + 1
+            elif t["status"] == "late" and (today - t["due"]).days <= 7: late += 1
+    html('<div class="sec">Work in the next 2 days</div>')
+    items = "".join(f'<div class="row"><div class="ic">🧰</div><div class="tx">{esc(k)}<div class="tm">{v} field{"s" if v != 1 else ""}</div></div></div>'
+                    for k, v in sorted(upcoming.items(), key=lambda kv: -kv[1])[:5])
+    html(f'<div class="stats"><div class="stat"><small>Tasks due soon</small><div class="v">{due}</div></div>'
+         f'<div class="stat"><small>Overdue (last 7 days)</small><div class="v" style="color:{"#C2543B" if late else "#12503A"}">{late}</div></div></div>{items}')
+
+    # disease watch
+    html('<div class="sec">Disease watch (30 days)</div>')
+    if not scans:
+        html('<div class="card"><div class="res-c" style="margin:0">No scans shared in the last 30 days.</div></div>')
+    else:
+        cnt = {}
+        for sc in scans: cnt[sc["summary"].rsplit(" (", 1)[0]] = cnt.get(sc["summary"].rsplit(" (", 1)[0], 0) + 1
+        mx = max(cnt.values())
+        bars = "".join(f'<div style="margin:.55rem 0"><div class="conf"><span>{esc(k)}</span><span>{v} scan{"s" if v != 1 else ""}</span></div>{bar(v / mx, "#C2543B")}</div>'
+                       for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])[:6])
+        html(f'<div class="card">{bars}</div>')
+        trs = "".join(f'<tr><td>{esc(sc["ts"][:10])}</td><td>{esc(who.get(sc["user_id"], {}).get("name", "Farmer"))}</td><td>{esc(who.get(sc["user_id"], {}).get("location", ""))}</td><td>{esc(sc["summary"])}</td></tr>'
+                      for sc in scans[:12])
+        html(f'<div class="tbl-wrap"><table class="tbl"><tr><th>Date</th><th>Farmer</th><th>Location</th><th>Result</th></tr>{trs}</table></div>')
+
+    # farmers table + export
+    html('<div class="sec">Farmers</div>')
+    per = {}
+    for f in fields:
+        p = per.setdefault(f["user_id"], [0, 0.0]); p[0] += 1; p[1] += float(f["area"])
+    trs = "".join(f'<tr><td>{esc(m["name"])}</td><td>{esc(m.get("location") or "")}</td><td>{per.get(m["user_id"], [0, 0])[0]}</td><td>{per.get(m["user_id"], [0, 0.0])[1]:.1f}</td><td>{esc((m.get("last_active") or "never")[:10])}</td></tr>'
+                  for m in sorted(members, key=lambda m: m["name"].lower()))
+    html(f'<div class="tbl-wrap"><table class="tbl"><tr><th>Name</th><th>Location</th><th>Fields</th><th>Hectares</th><th>Last active</th></tr>{trs}</table></div>')
+    import csv
+    buf = io.StringIO(); w = csv.writer(buf); w.writerow(["Farmer", "Location", "Crop", "Hectares", "Planted", "Next task", "Next task date"])
+    for f in fields:
+        nxt = None
+        if f["crop"] in SCHEDULE:
+            pend = [t for t in compute_tasks(f["crop"], dt.date.fromisoformat(f["planted"]), done_by.get(f["plot_id"], set()), today) if t["status"] != "done" and t["due"] >= today]
+            nxt = pend[0] if pend else None
+        m = who.get(f["user_id"], {})
+        w.writerow([m.get("name", ""), m.get("location", ""), f["crop"], f["area"], f["planted"], nxt["text"] if nxt else "", nxt["due"].isoformat() if nxt else ""])
+    st.download_button("Download fields (CSV)", buf.getvalue(), file_name=f"{coop['name'].replace(' ', '_')}_fields.csv", mime="text/csv", key="coop_csv")
+
+    # manage
+    with st.expander("Manage cooperative"):
+        st.button("Make a new join code", key="coop_newcode", on_click=new_code, args=(coop["id"],))
+        st.caption("A new code stops the old one working. Farmers who already joined stay in.")
+        if members:
+            pick = st.selectbox("Remove a farmer", [m["user_id"] for m in members], format_func=lambda u: who[u]["name"], key="coop_rm_pick")
+            st.button("Remove from cooperative", key="coop_rm", on_click=lambda: remove_member(st.session_state["coop_rm_pick"]))   # read the pick at click time
+    st.caption("You only see fields, task progress and disease scans of farmers who chose to share. Phone numbers and money records are never shared.")
 
 # ---------------- Sign-in screen (cloud mode only) ----------------
 def login_screen():
@@ -742,7 +864,7 @@ if sb_on() and not sb_token():
 # ---------------- Sidebar ----------------
 NAV = [("🏠", "Home", "Home"), ("🍃", "Disease Detection", "Disease Detection"), ("🌱", "Crop Recommendation", "Crop Recommendation"),
        ("⛅", "Weather Forecast", "Weather Forecast"), ("📈", "Yield Prediction", "Yield Prediction"), ("📅", "Crop Calendar", "Crop Calendar"),
-       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🔔", "Reminders", "Reminders"), ("🕘", "History", "History")]
+       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🤝", "Cooperative", "Cooperative"), ("🔔", "Reminders", "Reminders"), ("🕘", "History", "History")]
 with st.sidebar:
     html('<div class="sb-brand"><div class="sb-logo">🌾</div><div><div class="sb-name">FarmAI</div><div class="sb-tag">Smart farming for The Gambia</div></div></div>')
     for ic, target, label in NAV:
@@ -896,11 +1018,11 @@ elif page == "Weather Forecast":
 elif page == "Yield Prediction":
     header("📈", "Yield Prediction", "Estimate how much you can harvest and when.")
     with st.container(border=True):
-        crop = st.selectbox("Crop", list(CROPS))
-        soil = st.selectbox("Soil type", ["Loamy", "Sandy", "Clay", "Silty"])
+        crop = st.selectbox("Crop", list(CROPS), key="y_crop")
+        soil = st.selectbox("Soil type", ["Loamy", "Sandy", "Clay", "Silty"], key="y_soil")
         a1, a2 = st.columns(2)
-        area = a1.number_input("Farm size (hectares)", 0.1, 1000.0, 1.0)
-        plant = a2.date_input("Planting date", dt.date.today())
+        area = a1.number_input("Farm size (hectares)", 0.1, 1000.0, 1.0, key="y_area")
+        plant = a2.date_input("Planting date", dt.date.today(), key="y_plant")
         c1, c2 = st.columns(2)
         temp = c1.number_input("Avg temperature (°C)", 5.0, 45.0, 30.0)
         rain = c2.number_input("Rainfall (mm / month)", 0.0, 500.0, 120.0)
@@ -920,7 +1042,7 @@ elif page == "Yield Prediction":
              f'<div class="note">This is an estimate from typical crop data, not a trained model.</div></div>')
         log("Yield", f"{crop}: {per_ha*area:.1f} t on {area} ha")
 
-    st.button("📅 Save to crop calendar", on_click=add_plot, args=(crop, area, soil, plant), key="save_plot")
+    st.button("📅 Save to crop calendar", on_click=lambda: add_plot(*(st.session_state[k] for k in ("y_crop", "y_area", "y_soil", "y_plant"))), key="save_plot")   # read values at click time
 
 elif page == "Crop Calendar":
     header("📅", "Crop Calendar", "Track every field and never miss a task.")
@@ -933,7 +1055,7 @@ elif page == "Crop Calendar":
         csoil = c1.selectbox("Soil type", ["Loamy", "Sandy", "Clay", "Silty"], key="cal_soil")
         carea = c2.number_input("Farm size (hectares)", 0.1, 1000.0, 1.0, key="cal_area")
         cdate = st.date_input("Planting date", dt.date.today(), key="cal_date")
-        st.button("Add to calendar", type="primary", on_click=add_plot, args=(cc, carea, csoil, cdate), key="cal_add")
+        st.button("Add to calendar", type="primary", on_click=lambda: add_plot(*(st.session_state[k] for k in ("cal_crop", "cal_area", "cal_soil", "cal_date"))), key="cal_add")   # read values at click time
     if not plots:
         html('<div class="card" style="text-align:center"><div style="font-size:2rem">📅</div><div class="res-t" style="font-size:1.2rem">No fields yet</div>'
              '<div class="res-c">Add a crop and its planting date. FarmAI will list weeding, fertiliser, spraying and harvest dates for you.</div></div>')
@@ -1013,6 +1135,45 @@ elif page == "Season Ledger":
                      f'<span style="color:{"#17703A" if sale else "#A63A22"}">{"+" if sale else "-"}{money(e["amount"])}</span>'
                      f'<div class="tm">{e["d"].strftime("%d %b %Y")}{" · " + esc(e["note"]) if e["note"] else ""}</div></div></div>')
             cx.button("✕", key=f"le_del{e['id']}", on_click=del_entry, args=(e["id"],))
+
+elif page == "Cooperative":
+    header("🤝", "Cooperative", "Join a cooperative, or run one and see how your farmers are doing.")
+    if not sb_on():
+        st.info("Cooperatives need accounts. Set SUPABASE_URL and SUPABASE_ANON_KEY so farmers can sign in, then come back here.")
+    else:
+        t_me, t_mgr = st.tabs(["My cooperative", "Run a cooperative"])
+        with t_me:
+            mine = get_my_coop()
+            if mine:
+                html(f'<div class="card"><span class="badge b-ok">Member</span><div class="res-t">{esc(mine["name"])}</div>'
+                     f'<div class="res-c" style="margin:0">{"Sharing is on" if mine.get("share_data") else "Sharing is off, so the cooperative sees nothing from you"}</div></div>')
+                want = st.toggle("Share my fields and scans with this cooperative", value=bool(mine.get("share_data")), key="coop_share")
+                if want != bool(mine.get("share_data")): set_sharing(want); st.rerun()
+                st.caption("Shared: your name, location, fields (crop, size, planting date), task progress and disease scans. Never shared: your phone number, money records or messages. You can stop sharing or leave at any time.")
+                st.button("Leave cooperative", key="coop_leave", on_click=leave_coop)
+            else:
+                prof = get_profile()
+                nm = st.text_input("Your name (shown to the cooperative)", prof.get("name") or "", key="coop_name")
+                code = st.text_input("Cooperative code", key="coop_code", placeholder="e.g. 7K2F9A")
+                st.caption("By joining you agree to share your name, location, fields, task progress and disease scans with the cooperative. Your phone number and money records stay private. You can stop sharing or leave at any time.")
+                if st.button("Join cooperative", type="primary", key="coop_join"):
+                    if not nm.strip(): st.warning("Enter your name so the cooperative knows who you are.")
+                    elif not code.strip(): st.warning("Enter the code your cooperative gave you.")
+                    else:
+                        save_profile({"name": nm.strip()})
+                        res = join_coop(code)
+                        if res: st.toast(f"You joined {res}", icon="🤝"); st.rerun()
+                        else: st.error(st.session_state.get("_sb_err") or "Could not join. Check the code and try again.")
+        with t_mgr:
+            owned = get_owned_coops()
+            if not owned:
+                st.caption("For cooperatives, NGOs and extension officers: create a cooperative, share its code, and see what your farmers plant, which tasks are coming up and which diseases are appearing.")
+                nm2 = st.text_input("Cooperative name", key="coop_new_name", placeholder="e.g. Kombo Farmers Association")
+                if st.button("Create cooperative", type="primary", key="coop_create"):
+                    if nm2.strip(): create_coop(nm2); st.rerun()
+                    else: st.warning("Enter a name for the cooperative.")
+            else:
+                coop_dashboard(owned[0])
 
 elif page == "Reminders":
     header("🔔", "Reminders", "A WhatsApp or SMS each morning with your tasks and rain alerts.")
