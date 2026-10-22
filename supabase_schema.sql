@@ -182,3 +182,111 @@ revoke all on function public.join_cooperative(text), public.my_cooperative(), p
   public.coop_members_list(), public.coop_fields(), public.coop_done(), public.coop_scans(int), public.coop_remove_member(uuid), public.coop_new_code(bigint) from public;
 grant execute on function public.join_cooperative(text), public.my_cooperative(), public.set_coop_sharing(boolean), public.leave_cooperative(),
   public.coop_members_list(), public.coop_fields(), public.coop_done(), public.coop_scans(int), public.coop_remove_member(uuid), public.coop_new_code(bigint) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- First-run setup (profile fields) and in-app feedback.
+-- ---------------------------------------------------------------------------
+alter table public.profiles add column if not exists crops text not null default '';
+alter table public.profiles add column if not exists onboarded boolean not null default false;
+
+create table if not exists public.feedback (
+  id         bigint generated always as identity primary key,
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  from_page  text not null default '',
+  category   text not null default '',
+  rating     int check (rating between 1 and 5),
+  message    text not null default '' check (length(message) <= 2000)
+);
+alter table public.feedback enable row level security;
+drop policy if exists "own rows" on public.feedback;
+create policy "own rows" on public.feedback for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- To read feedback yourself (Supabase -> SQL Editor):
+--   select f.created_at, p.name, p.location, f.from_page, f.category, f.rating, f.message
+--   from public.feedback f left join public.profiles p using (user_id) order by f.created_at desc;
+
+-- ---------------------------------------------------------------------------
+-- Cooperative alerts: the owner warns all members. Members read them in the app,
+-- and the daily reminder job adds new ones to the next morning message.
+-- Members receive alerts even when they have switched data sharing off.
+-- ---------------------------------------------------------------------------
+alter table public.profiles add column if not exists last_sent_at timestamptz;
+
+create table if not exists public.coop_alerts (
+  id         bigint generated always as identity primary key,
+  coop_id    bigint not null references public.cooperatives(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  title      text not null check (length(trim(title)) between 1 and 80),
+  body       text not null check (length(trim(body)) between 1 and 600),
+  severity   text not null default 'info' check (severity in ('info', 'warning', 'urgent'))
+);
+create index if not exists coop_alerts_coop_idx on public.coop_alerts(coop_id, created_at desc);
+
+create table if not exists public.alert_reads (
+  user_id  uuid   not null default auth.uid() references auth.users(id) on delete cascade,
+  alert_id bigint not null references public.coop_alerts(id) on delete cascade,
+  read_at  timestamptz not null default now(),
+  primary key (user_id, alert_id)
+);
+
+alter table public.coop_alerts enable row level security;
+alter table public.alert_reads enable row level security;
+drop policy if exists "owner manages alerts" on public.coop_alerts;
+drop policy if exists "own reads" on public.alert_reads;
+create policy "owner manages alerts" on public.coop_alerts for all to authenticated
+  using (coop_id in (select id from public.cooperatives where owner_id = auth.uid()))
+  with check (coop_id in (select id from public.cooperatives where owner_id = auth.uid()));
+create policy "own reads" on public.alert_reads for select to authenticated using (user_id = auth.uid());
+-- members never read coop_alerts directly; they use my_alerts() below
+
+create or replace function public.send_coop_alert(p_title text, p_body text, p_severity text default 'info') returns int
+language plpgsql security definer set search_path = public as $$
+declare cid bigint; n int;
+begin
+  select id into cid from public.cooperatives where owner_id = auth.uid() order by id limit 1;
+  if cid is null then raise exception 'You do not run a cooperative'; end if;
+  if (select count(*) from public.coop_alerts where coop_id = cid and created_at > now() - interval '24 hours') >= 10 then
+    raise exception 'Daily alert limit reached (10 per day)';
+  end if;
+  insert into public.coop_alerts(coop_id, title, body, severity) values (cid, trim(p_title), trim(p_body), coalesce(p_severity, 'info'));
+  select count(*) into n from public.coop_members where coop_id = cid;
+  return n;
+end $$;
+
+create or replace function public.coop_reach() returns int
+language sql stable security definer set search_path = public as $$
+  select count(*)::int from public.coop_members where coop_id in (select id from public.cooperatives where owner_id = auth.uid());
+$$;
+
+create or replace function public.coop_sent_alerts() returns table(id bigint, created_at timestamptz, title text, body text, severity text, reads bigint, members bigint)
+language sql stable security definer set search_path = public as $$
+  select a.id, a.created_at, a.title, a.body, a.severity,
+         (select count(*) from public.alert_reads r where r.alert_id = a.id),
+         (select count(*) from public.coop_members m where m.coop_id = a.coop_id and m.joined_at <= a.created_at)
+  from public.coop_alerts a
+  where a.coop_id in (select id from public.cooperatives where owner_id = auth.uid())
+  order by a.created_at desc limit 20;
+$$;
+
+create or replace function public.my_alerts(p_days int default 30) returns table(id bigint, created_at timestamptz, title text, body text, severity text, coop_name text, is_read boolean)
+language sql stable security definer set search_path = public as $$
+  select a.id, a.created_at, a.title, a.body, a.severity, c.name,
+         exists (select 1 from public.alert_reads r where r.alert_id = a.id and r.user_id = auth.uid())
+  from public.coop_alerts a
+  join public.coop_members m on m.coop_id = a.coop_id
+  join public.cooperatives c on c.id = a.coop_id
+  where m.user_id = auth.uid() and a.created_at >= m.joined_at and a.created_at >= now() - make_interval(days => p_days)
+  order by a.created_at desc limit 50;
+$$;
+
+create or replace function public.mark_alerts_read() returns void
+language sql security definer set search_path = public as $$
+  insert into public.alert_reads(user_id, alert_id)
+  select auth.uid(), a.id from public.coop_alerts a join public.coop_members m on m.coop_id = a.coop_id
+  where m.user_id = auth.uid() and a.created_at >= m.joined_at
+  on conflict do nothing;
+$$;
+
+revoke all on function public.send_coop_alert(text, text, text), public.coop_reach(), public.coop_sent_alerts(), public.my_alerts(int), public.mark_alerts_read() from public;
+grant execute on function public.send_coop_alert(text, text, text), public.coop_reach(), public.coop_sent_alerts(), public.my_alerts(int), public.mark_alerts_read() to authenticated;

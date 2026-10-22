@@ -39,9 +39,10 @@ def compute_tasks(crop, planted, done=(), today=None):
         out.append(dict(idx=idx, due=due, kind=kind, text=text, status=status))
     return out
 
-def build_message(plots, rain_pct=None, today=None, max_overdue_days=3):
+def build_message(plots, rain_pct=None, today=None, max_overdue_days=3, alerts=()):
     """Morning reminder text, or None when there is nothing to say.
-    plots: list of dicts with crop, planted (date) and done (set of task indexes)."""
+    plots: list of dicts with crop, planted (date) and done (set of task indexes).
+    alerts: new cooperative alerts (dicts with title, body, severity) to show first."""
     today = today or dt.date.today(); tomorrow = today + dt.timedelta(days=1)
     now, soon, late = [], [], []; rain_hit = False
     for p in plots:
@@ -55,8 +56,10 @@ def build_message(plots, rain_pct=None, today=None, max_overdue_days=3):
             elif 0 < gap <= max_overdue_days: late.append(f"• {label}: {t['text']} ({gap} day{'s' if gap != 1 else ''} late)")
             else: continue
             if t["kind"] in RAIN_SENSITIVE: rain_hit = True
-    if not (now or soon or late): return None
+    alert_lines = [f"• {'URGENT: ' if a.get('severity') == 'urgent' else ''}{a['title']}: {a['body']}" for a in alerts]
+    if not (now or soon or late or alert_lines): return None
     parts = ["🌾 FarmAI reminder"]
+    if alert_lines: parts.append("From your cooperative\n" + "\n".join(alert_lines))
     for title, items in (("Today", now), ("Tomorrow", soon), ("Overdue", late)):
         if items: parts.append(title + "\n" + "\n".join(items))
     if rain_pct is not None and rain_pct >= 60 and rain_hit:

@@ -1,7 +1,7 @@
 """FarmAI daily reminders. Run once a day (see .github/workflows/reminders.yml).
 
-For every farmer with reminders switched on it builds the morning message (tasks due today or tomorrow,
-overdue tasks, rain alert) and sends it by WhatsApp or SMS through Twilio. Farmers with nothing to do get nothing.
+For every farmer with reminders switched on it builds the morning message (new alerts from their cooperative,
+tasks due today or tomorrow, overdue tasks, rain alert) and sends it by WhatsApp or SMS through Twilio. Farmers with nothing to do get nothing.
 
 Environment variables
   SUPABASE_URL, SUPABASE_SERVICE_KEY    service_role key: server only, never put it in the Streamlit app
@@ -63,10 +63,26 @@ def send(phone, channel, body):
     if r.status_code >= 400: print(f"  Twilio error {r.status_code}: {r.text[:200]}"); return False
     return True
 
+def ts(v):
+    """Parse a Postgres timestamp string; None when missing."""
+    if not v: return None
+    return dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+
+def load_alerts(now):
+    """New cooperative alerts from the last 2 days, plus which cooperative each farmer belongs to."""
+    try:
+        since = (now - dt.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        alerts = sb("GET", "coop_alerts", {"select": "id,coop_id,title,body,severity,created_at", "created_at": f"gte.{since}", "order": "created_at.asc"})
+        members = {m["user_id"]: m for m in sb("GET", "coop_members", {"select": "user_id,coop_id,joined_at"})}
+        return alerts, members
+    except Exception as e:                      # cooperative tables not created yet
+        print(f"  cooperative alerts unavailable: {e}"); return [], {}
+
 def main():
     if not (SB_URL and SB_KEY): sys.exit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY.")
-    today = dt.date.today(); only = os.getenv("ONLY_PHONE")
-    profiles = sb("GET", "profiles", {"select": "user_id,phone,channel,location,lang,last_sent", "reminders": "eq.true"})
+    today = dt.date.today(); only = os.getenv("ONLY_PHONE"); now = dt.datetime.now(dt.timezone.utc)
+    alerts, members = load_alerts(now)
+    profiles = sb("GET", "profiles", {"select": "user_id,phone,channel,location,lang,last_sent,last_sent_at", "reminders": "eq.true"})
     print(f"{today}: {len(profiles)} farmer(s) with reminders on" + (" (dry run)" if DRY else ""))
     sent = skipped = failed = 0
     for pr in profiles:
@@ -77,12 +93,15 @@ def main():
             plots = sb("GET", "plots", {"select": "id,crop,planted", "user_id": f"eq.{uid}"})
             done = {}
             for r in sb("GET", "task_done", {"select": "plot_id,idx", "user_id": f"eq.{uid}"}): done.setdefault(r["plot_id"], set()).add(r["idx"])
+            mem = members.get(uid)
+            since = max(ts(pr.get("last_sent_at")) or (now - dt.timedelta(days=2)), ts(mem["joined_at"]) if mem and mem.get("joined_at") else now - dt.timedelta(days=2))
+            mine = [a for a in alerts if mem and a["coop_id"] == mem["coop_id"] and ts(a["created_at"]) > since]
             msg = build_message([dict(crop=p["crop"], planted=dt.date.fromisoformat(p["planted"]), done=done.get(p["id"], set())) for p in plots],
-                                rain_chance(pr.get("location") or "Banjul"), today)
+                                rain_chance(pr.get("location") or "Banjul"), today, alerts=mine)
             if not msg: skipped += 1; continue
             if send(pr["phone"], pr.get("channel", "whatsapp"), translate(msg, pr.get("lang", "English"))):
                 sent += 1
-                if not DRY: sb("PATCH", "profiles", {"user_id": f"eq.{uid}"}, {"last_sent": today.isoformat()})
+                if not DRY: sb("PATCH", "profiles", {"user_id": f"eq.{uid}"}, {"last_sent": today.isoformat(), "last_sent_at": now.isoformat()})
             else: failed += 1
         except Exception as e:
             failed += 1; print(f"  farmer {str(uid)[:8]}: {e}")
