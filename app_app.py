@@ -6,7 +6,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-st.set_page_config(page_title="FarmAI", page_icon="FarmerAI Green Tech Logo.png", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="FarmAI", page_icon="🌾", layout="centered", initial_sidebar_state="auto")
 
 # ---------------- Design system ----------------
 CSS = """
@@ -141,7 +141,11 @@ section[data-testid="stSidebar"] .sb-av{color:#14231B;}
 .sb-em{font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 div[data-testid="stFormSubmitButton"]>button{width:100%;border-radius:12px;background:var(--g);color:#fff;border:1px solid var(--g);padding:.75rem 1rem;font-weight:600;font-size:1rem;}
 div[data-testid="stFormSubmitButton"]>button:hover{background:var(--g2);color:#fff;border-color:var(--g2);}
-div[data-testid="stFormSubmitButton"]{width:100%;}
+div[data-testid="stFormSubmitButton"]{width:100%!important;}
+[data-testid="stElementContainer"]:has(>[data-testid="stFormSubmitButton"]){width:100%!important;}
+.al{border-radius:16px;padding:.8rem 1rem;margin:.5rem 0;border-left:5px solid #1F8A4C;background:#E4F0E8;}
+.al.warning{background:#FBF3DC;border-left-color:#E3A72F;} .al.urgent{background:#FDF1ED;border-left-color:#C2543B;}
+.al .t{font-weight:700;font-size:1.02rem;} .al .b{margin:.25rem 0;font-size:.95rem;white-space:pre-line;} .al .m{color:var(--mut);font-size:.8rem;}
 .tbl-wrap{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:.3rem .6rem;margin:.4rem 0 .8rem;}
 .tbl{width:100%;border-collapse:collapse;font-size:.92rem;}
 .tbl,.tbl th,.tbl td{border:none!important;background:transparent;}
@@ -264,7 +268,7 @@ def sb_signout():
     if a.get("access"):          # best effort: revoke the session on the server
         try: requests.post(f"{sb_url()}/auth/v1/logout", headers={"apikey": sb_key(), "Authorization": f"Bearer {a['access']}"}, timeout=10)
         except Exception: pass
-    for k in ("auth", "_c", "chat", "pending"): st.session_state.pop(k, None)
+    for k in ("auth", "_c", "chat", "pending", "_lang_set"): st.session_state.pop(k, None)
     st.session_state["_cookie_op"] = ("clear", None)
     st.session_state.page = "Home"
 
@@ -311,6 +315,7 @@ def _db():
     c.execute("create table if not exists history(ts text, kind text, summary text)")
     c.execute("create table if not exists plots(id integer primary key autoincrement, crop text, area real, soil text, planted text)")
     c.execute("create table if not exists task_done(plot_id integer, idx integer, primary key(plot_id, idx))")
+    c.execute("create table if not exists feedback(ts text, from_page text, category text, rating integer, message text)")
     c.execute("create table if not exists ledger(id integer primary key autoincrement, d text, kind text, crop text, cat text, amount real, note text)")
     return c
 
@@ -703,7 +708,7 @@ def normalize_phone(raw):
 
 def get_profile():
     def load():
-        rows = sb("GET", "profiles", {"select": "phone,channel,location,lang,reminders,name", "limit": 1}) or [] if sb_on() else []
+        rows = sb("GET", "profiles", {"select": "phone,channel,location,lang,reminders,name,crops,onboarded", "limit": 1}) or [] if sb_on() else []
         return rows[0] if rows else {}
     return _cached("profile", load)
 
@@ -712,6 +717,60 @@ def save_profile(p):
     body = {**p, "user_id": st.session_state.auth["uid"], "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     sb("POST", "profiles", params={"on_conflict": "user_id"}, body=body, prefer="resolution=merge-duplicates,return=minimal")
     _dirty()
+
+def first_name():
+    n = ((get_profile().get("name") if sb_on() else "") or "").strip()
+    return n.split()[0] if n else ""
+
+def my_location():
+    return ((get_profile().get("location") if sb_on() else "") or "").strip() or "Banjul"
+
+def crop_options(extra=()):
+    """All crops, with the farmer's main crops first."""
+    mine = [c for c in ((get_profile().get("crops") if sb_on() else "") or "").split(",") if c in CROPS]
+    return mine + [c for c in CROPS if c not in mine] + list(extra)
+
+def add_feedback(rating, category, message, from_page):
+    msg = message.strip()[:1500]
+    if sb_on():
+        return sb("POST", "feedback", body=dict(from_page=from_page, category=category, rating=rating, message=msg), prefer="return=minimal") is not None
+    c = _db(); c.execute("insert into feedback values (?,?,?,?,?)", (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), from_page, category, rating, msg)); c.commit(); c.close()
+    return True
+
+# ---------------- Profile and first-run setup ----------------
+def profile_form(key, prof, submit):
+    with st.form(key):
+        nm = st.text_input("Your name", prof.get("name") or "")
+        loc = st.text_input("Village or town", prof.get("location") or "", placeholder="e.g. Brikama")
+        have = [c for c in (prof.get("crops") or "").split(",") if c in CROPS]
+        crops = st.multiselect("Main crops you grow (up to 4)", list(CROPS), default=have, max_selections=4)
+        lg = st.selectbox("Language", LANGS, index=LANGS.index(prof["lang"]) if prof.get("lang") in LANGS else LANGS.index(st.session_state.lang))
+        ok = st.form_submit_button(submit)
+    return ok, nm.strip(), loc.strip(), crops, lg
+
+def save_onboarding(nm, loc, crops, lg):
+    """Returns an error message, or None when saved."""
+    if not nm: return "Please enter your name."
+    loc = loc or "Banjul"
+    try:
+        if not fetch_weather(loc): return f"We could not find '{loc}' on the map. Try a bigger town nearby, for example Brikama or Banjul."
+    except Exception:
+        pass                                   # offline: accept it, weather will retry later
+    save_profile(dict(name=nm, location=loc, crops=",".join(crops), lang=lg, onboarded=True))
+    st.session_state.lang = lg
+    return None
+
+def skip_onboarding(): save_profile(dict(onboarded=True))
+
+def onboarding_screen():
+    html('<div class="hero"><div class="hero-date">Welcome</div><div class="hero-h">Let’s set up your farm</div>'
+         '<div class="hero-p">Four quick questions, so FarmAI can greet you by name, check the weather where you farm and show your crops first.</div></div>')
+    ok, nm, loc, crops, lg = profile_form("onboard_form", get_profile(), "Start using FarmAI")
+    if ok:
+        err = save_onboarding(nm, loc, crops, lg)
+        if err: st.warning(err)
+        else: st.rerun()
+    st.button("Skip for now", key="onboard_skip", on_click=skip_onboarding)
 
 # ---------------- Cooperatives ----------------
 def get_my_coop():
@@ -731,6 +790,73 @@ def create_coop(name):
     sb("POST", "cooperatives", body={"name": name.strip()}, prefer="return=minimal"); _dirty()
 def new_code(cid): sb_rpc("coop_new_code", {"p_coop": cid}); _dirty()
 def remove_member(uid): sb_rpc("coop_remove_member", {"p_user": uid}); _dirty()
+
+def get_alerts():
+    def load():
+        rows = sb_rpc("my_alerts", {"p_days": 30}, quiet=True) if sb_on() else []
+        return rows if isinstance(rows, list) else []
+    return _cached("alerts", load)
+def unread_alerts(): return [a for a in get_alerts() if not a.get("is_read")]
+def mark_read(): sb_rpc("mark_alerts_read", quiet=True); _dirty()
+def send_alert(title, body, sev):
+    res = sb_rpc("send_coop_alert", {"p_title": title.strip(), "p_body": body.strip(), "p_severity": sev}, quiet=True); _dirty(); return res
+def delete_alert(aid): sb("DELETE", "coop_alerts", {"id": f"eq.{aid}"}); _dirty()
+
+def alert_html(a, extra=""):
+    sev = a.get("severity") if a.get("severity") in ("warning", "urgent") else "info"
+    tag = {"warning": "Warning", "urgent": "Urgent"}.get(sev, "")
+    who = f'{esc(a["coop_name"])} · ' if a.get("coop_name") else ""
+    new = ' <span class="badge b-warn">New</span>' if a.get("is_read") is False else ""
+    return (f'<div class="al {sev}"><div class="t">{(esc(tag) + ": ") if tag else ""}{esc(a["title"])}{new}</div><div class="b">{esc(a["body"])}</div>'
+            f'<div class="m">{who}{esc(str(a["created_at"])[:10])}{extra}</div></div>')
+
+ALERT_TEMPLATES = {
+    "Choose a template": None,
+    "Disease warning": ("Disease reported nearby", "[Disease] has been reported near [place]. Check your [crop] today and remove infected leaves. Scan a leaf in FarmAI if you are unsure.", "warning"),
+    "Heavy rain expected": ("Heavy rain expected", "Heavy rain is expected on [day]. Delay spraying and fertiliser, and make sure water can drain from your fields.", "warning"),
+    "Meeting": ("Cooperative meeting", "We meet on [day] at [time] at [place]. Please come and bring your questions.", "info"),
+    "Seed or fertiliser available": ("Inputs available", "[Item] is available from [date] at [place]. Price: [price].", "info"),
+}
+def apply_template():
+    t = ALERT_TEMPLATES.get(st.session_state.get("al_tpl"))
+    if t: st.session_state["al_title"], st.session_state["al_body"], st.session_state["al_sev"] = t
+def draft_disease_alert(name, n):
+    st.session_state["al_title"] = f"Warning: {name}"[:80]
+    st.session_state["al_body"] = f"{name} has been scanned {n} time{'s' if n != 1 else ''} by members in the last 30 days. Check your plants today and scan a leaf in FarmAI if you see spots or wilting."
+    st.session_state["al_sev"] = "warning"
+
+def alert_composer(top):
+    """Owner tool: write an alert and send it to every member. top = (disease name, scans) or None."""
+    reach = _cached("c_reach", lambda: sb_rpc("coop_reach", quiet=True))
+    reach = reach if isinstance(reach, int) else 0
+    sent = _cached("c_sent", lambda: sb_rpc("coop_sent_alerts", quiet=True) or [])
+    html('<div class="sec">Alert your members</div>')
+    if st.session_state.pop("al_clear", False):
+        st.session_state["al_title"] = ""; st.session_state["al_body"] = ""; st.session_state["al_sev"] = "info"; st.session_state["al_tpl"] = "Choose a template"
+    msg = st.session_state.pop("al_msg", None)
+    if msg: st.success(msg)
+    st.session_state.setdefault("al_sev", "info")
+    with st.container(border=True):
+        st.selectbox("Start from a template", list(ALERT_TEMPLATES), key="al_tpl", on_change=apply_template)
+        if top: st.button(f"Draft an alert about {top[0]}", key="al_draft", on_click=draft_disease_alert, args=top)
+        title = st.text_input("Title", key="al_title", max_chars=80)
+        body = st.text_area("Message", key="al_body", max_chars=600, height=120, placeholder="Keep it short and clear. Say what to do.")
+        sev = st.radio("How urgent?", ["info", "warning", "urgent"], key="al_sev", horizontal=True, format_func=lambda v: v.capitalize())
+        if st.button(f"Send to {reach} member{'s' if reach != 1 else ''}", type="primary", key="al_send"):
+            if not title.strip() or not body.strip(): st.warning("Write a title and a message first.")
+            elif "[" in title + body: st.warning("Replace the [brackets] with real details before sending.")
+            else:
+                res = send_alert(title, body, sev)
+                if res is None: st.error(st.session_state.get("_sb_err") or "Could not send the alert. Try again.")
+                else:
+                    st.session_state["al_msg"] = f"Alert sent to {res} member{'s' if res != 1 else ''}. They see it in the app, and in their next morning reminder."
+                    st.session_state["al_clear"] = True; st.rerun()
+        st.caption("Members get it in the app and in their next morning WhatsApp or SMS reminder. You can send up to 10 alerts a day.")
+    if sent:
+        html('<div class="plot-m" style="margin:.8rem 0 .2rem">Sent alerts</div>')
+        for a in sent:
+            html(alert_html(a, f" · read by {a['reads']} of {a['members']}"))
+            st.button("Delete", key=f"al_del{a['id']}", on_click=delete_alert, args=(a["id"],))
 
 def coop_dashboard(coop):
     members = _cached("c_members", lambda: sb_rpc("coop_members_list") or [])
@@ -779,18 +905,21 @@ def coop_dashboard(coop):
 
     # disease watch
     html('<div class="sec">Disease watch (30 days)</div>')
+    top_disease = None
     if not scans:
         html('<div class="card"><div class="res-c" style="margin:0">No scans shared in the last 30 days.</div></div>')
     else:
         cnt = {}
         for sc in scans: cnt[sc["summary"].rsplit(" (", 1)[0]] = cnt.get(sc["summary"].rsplit(" (", 1)[0], 0) + 1
-        mx = max(cnt.values())
+        mx = max(cnt.values()); top_disease = max(cnt.items(), key=lambda kv: kv[1])
         bars = "".join(f'<div style="margin:.55rem 0"><div class="conf"><span>{esc(k)}</span><span>{v} scan{"s" if v != 1 else ""}</span></div>{bar(v / mx, "#C2543B")}</div>'
                        for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])[:6])
         html(f'<div class="card">{bars}</div>')
         trs = "".join(f'<tr><td>{esc(sc["ts"][:10])}</td><td>{esc(who.get(sc["user_id"], {}).get("name", "Farmer"))}</td><td>{esc(who.get(sc["user_id"], {}).get("location", ""))}</td><td>{esc(sc["summary"])}</td></tr>'
                       for sc in scans[:12])
         html(f'<div class="tbl-wrap"><table class="tbl"><tr><th>Date</th><th>Farmer</th><th>Location</th><th>Result</th></tr>{trs}</table></div>')
+
+    alert_composer(top_disease)
 
     # farmers table + export
     html('<div class="sec">Farmers</div>')
@@ -861,18 +990,30 @@ if sb_on() and not sb_token():
     flush_cookie()
     st.stop()
 
+if sb_on():
+    st.session_state.pop("_sb_err", None)
+    _p = get_profile()
+    if not _p.get("onboarded") and not st.session_state.get("_sb_err"):
+        onboarding_screen(); flush_cookie(); st.stop()
+    if not st.session_state.get("_lang_set"):
+        st.session_state["_lang_set"] = True
+        if _p.get("lang") in LANGS: st.session_state.lang = _p["lang"]
+
 # ---------------- Sidebar ----------------
 NAV = [("🏠", "Home", "Home"), ("🍃", "Disease Detection", "Disease Detection"), ("🌱", "Crop Recommendation", "Crop Recommendation"),
        ("⛅", "Weather Forecast", "Weather Forecast"), ("📈", "Yield Prediction", "Yield Prediction"), ("📅", "Crop Calendar", "Crop Calendar"),
-       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🤝", "Cooperative", "Cooperative"), ("🔔", "Reminders", "Reminders"), ("🕘", "History", "History")]
+       ("💰", "Season Ledger", "Season Ledger"), ("💬", "Ask AI", "Ask Farming AI"), ("🤝", "Cooperative", "Cooperative"), ("🔔", "Reminders", "Reminders"), ("📝", "Feedback", "Send feedback"), ("🕘", "History", "History")]
 with st.sidebar:
     html('<div class="sb-brand"><div class="sb-logo">🌾</div><div><div class="sb-name">FarmAI</div><div class="sb-tag">Smart farming for The Gambia</div></div></div>')
+    _unread = len(unread_alerts()) if sb_on() else 0
     for ic, target, label in NAV:
+        if target == "Cooperative" and _unread: label = f"{label} ({_unread} new)"
         st.button(f"{ic}  {label}", key=f"nav_{target}", on_click=go, args=(target,), type="primary" if page == target else "secondary")
     html('<div class="sb-sep"></div>')
     if sb_on():
         _em = st.session_state.auth.get("email") or "Signed in"
         html(f'<div class="sb-user"><div class="sb-av">{esc(_em[:1].upper())}</div><div class="sb-em">{esc(_em)}</div></div>')
+        st.button("My profile", key="open_profile", on_click=go, args=("Profile",))
         st.button("Sign out", key="signout", on_click=sb_signout)
     lang_picker("lang_side")
     _ents = get_entries(); _profit = sum(e["amount"] if e["kind"] == "sale" else -e["amount"] for e in _ents)
@@ -886,12 +1027,17 @@ with st.container(key="tabbar"):
         col.button(f"{ic} {label}", key=f"tab_{target}", on_click=go, args=(target,), type="primary" if page == target else "secondary")
 
 # ---------------- Pages ----------------
+if page != "Feedback": st.session_state["_fb_from"] = page      # so feedback records where the farmer was
 if page == "Home":
     now = dt.datetime.now()
     greet = "Good morning" if now.hour < 12 else "Good afternoon" if now.hour < 17 else "Good evening"
     html(f'<div class="hero"><div class="hero-date">{now.strftime("%A, %d %B")}</div>'
-         f'<div class="hero-h">{greet}, Farmer</div>'
+         f'<div class="hero-h">{greet}, {esc(first_name()) or "Farmer"}</div>'
          f'<div class="hero-p">Check a sick plant, choose what to grow, or ask for advice. Everything for your farm in one place.</div></div>')
+    _un = unread_alerts() if sb_on() else []
+    if _un:
+        html('<div class="sec" style="margin-top:.2rem">From your cooperative</div>' + "".join(alert_html(a) for a in _un[:2]))
+        st.button(f"Mark {'all ' if len(_un) > 1 else ''}as read", key="alerts_read_home", on_click=mark_read)
     lang_picker("lang_home")
     r1 = st.columns(2); r2 = st.columns(2); r3 = st.columns(2); r4 = st.columns(2)
     tile(r1[0], "🍃", "Disease Detection", "Scan a leaf of any crop and get treatment steps.", "Disease Detection", "#DDF1E3")
@@ -902,6 +1048,7 @@ if page == "Home":
     tile(r3[1], "💬", "Ask Farming AI", "Get answers to any farming question.", "Ask AI", "#E6E0F5")
     tile(r4[0], "💰", "Season Ledger", "Track costs, sales and profit per crop.", "Season Ledger", "#F6EBC8")
     tile(r4[1], "🕘", "History", "Review your past scans and plans.", "History", "#E4E8E2")
+    st.button("📝 Send feedback", key="home_feedback", on_click=go, args=("Feedback",))
     due = next_tasks(3)
     if due:
         html('<div class="sec">On your farm this week</div>')
@@ -989,7 +1136,7 @@ elif page == "Crop Recommendation":
 
 elif page == "Weather Forecast":
     header("⛅", "Weather Forecast", "Plan spraying, planting and harvest around the weather.")
-    city = st.text_input("Location", "Banjul")
+    city = st.text_input("Location", my_location())
     try:
         data = fetch_weather(city)
         if not data:
@@ -1018,7 +1165,7 @@ elif page == "Weather Forecast":
 elif page == "Yield Prediction":
     header("📈", "Yield Prediction", "Estimate how much you can harvest and when.")
     with st.container(border=True):
-        crop = st.selectbox("Crop", list(CROPS), key="y_crop")
+        crop = st.selectbox("Crop", crop_options(), key="y_crop")
         soil = st.selectbox("Soil type", ["Loamy", "Sandy", "Clay", "Silty"], key="y_soil")
         a1, a2 = st.columns(2)
         area = a1.number_input("Farm size (hectares)", 0.1, 1000.0, 1.0, key="y_area")
@@ -1047,10 +1194,10 @@ elif page == "Yield Prediction":
 elif page == "Crop Calendar":
     header("📅", "Crop Calendar", "Track every field and never miss a task.")
     plots = get_plots()
-    loc = st.text_input("Farm location (for rain alerts)", "Banjul", key="farm_loc")
+    loc = st.text_input("Farm location (for rain alerts)", my_location(), key="farm_loc")
     rainy = rain_soon(loc)
     with st.expander("➕ Add a field", expanded=not plots):
-        cc = st.selectbox("Crop", list(CROPS), key="cal_crop")
+        cc = st.selectbox("Crop", crop_options(), key="cal_crop")
         c1, c2 = st.columns(2)
         csoil = c1.selectbox("Soil type", ["Loamy", "Sandy", "Clay", "Silty"], key="cal_soil")
         carea = c2.number_input("Farm size (hectares)", 0.1, 1000.0, 1.0, key="cal_area")
@@ -1098,7 +1245,7 @@ elif page == "Season Ledger":
     with st.expander("➕ Add an entry", expanded=not entries):
         kind_l = st.radio("Type", ["Cost", "Sale"], horizontal=True, key="le_kind")
         c1, c2 = st.columns(2)
-        crop_e = c1.selectbox("Crop", list(CROPS) + ["General farm"], key="le_crop")
+        crop_e = c1.selectbox("Crop", crop_options(["General farm"]), key="le_crop")
         cat = c2.selectbox("Category", COST_CATS if kind_l == "Cost" else SALE_CATS, key="le_cat")
         c3, c4 = st.columns(2)
         amt = c3.number_input("Amount (D)", 0.0, 10_000_000.0, 0.0, step=50.0, key="le_amt")
@@ -1136,6 +1283,32 @@ elif page == "Season Ledger":
                      f'<div class="tm">{e["d"].strftime("%d %b %Y")}{" · " + esc(e["note"]) if e["note"] else ""}</div></div></div>')
             cx.button("✕", key=f"le_del{e['id']}", on_click=del_entry, args=(e["id"],))
 
+elif page == "Profile":
+    header("👤", "My profile", "Your name, village, crops and language.")
+    if not sb_on():
+        st.info("Profiles need an account. Set SUPABASE_URL and SUPABASE_ANON_KEY so farmers can sign in, then come back here.")
+    else:
+        ok, nm, loc, crops, lg = profile_form("profile_form", get_profile(), "Save profile")
+        if ok:
+            err = save_onboarding(nm, loc, crops, lg)
+            if err: st.warning(err)
+            else: st.success("Profile saved.")
+
+elif page == "Feedback":
+    header("📝", "Send feedback", "Tell us what is broken, confusing or missing.")
+    from_page = st.session_state.get("_fb_from", "Home")
+    with st.form("fb_form"):
+        rating = st.radio("How is FarmAI working for you?", [1, 2, 3, 4, 5], index=3, horizontal=True,
+                          format_func=lambda n: ["😞 Bad", "🙁 Poor", "😐 OK", "🙂 Good", "😀 Great"][n - 1])
+        cat = st.selectbox("What is this about?", ["Something is broken", "Something is confusing", "I need a new feature", "I like it"])
+        msg = st.text_area("Tell us more", max_chars=1000, height=140, placeholder="What happened? What did you expect?")
+        sent = st.form_submit_button("Send feedback")
+    if sent:
+        if len(msg.strip()) < 5: st.warning("Please write a few words so we can understand.")
+        elif add_feedback(rating, cat, msg, from_page): st.success("Thank you. Your feedback was saved.")
+        else: st.error("Could not send it. Check your connection and try again.")
+    st.caption("We also note which page you were on, so problems are easier to find.")
+
 elif page == "Cooperative":
     header("🤝", "Cooperative", "Join a cooperative, or run one and see how your farmers are doing.")
     if not sb_on():
@@ -1150,6 +1323,13 @@ elif page == "Cooperative":
                 want = st.toggle("Share my fields and scans with this cooperative", value=bool(mine.get("share_data")), key="coop_share")
                 if want != bool(mine.get("share_data")): set_sharing(want); st.rerun()
                 st.caption("Shared: your name, location, fields (crop, size, planting date), task progress and disease scans. Never shared: your phone number, money records or messages. You can stop sharing or leave at any time.")
+                alerts = get_alerts()
+                html('<div class="sec">Alerts from your cooperative</div>')
+                if alerts:
+                    html("".join(alert_html(a) for a in alerts[:10]))
+                    if unread_alerts(): st.button("Mark all as read", key="alerts_read_coop", on_click=mark_read)
+                else:
+                    html('<div class="card"><div class="res-c" style="margin:0">No alerts yet. Your cooperative can send you warnings and news here.</div></div>')
                 st.button("Leave cooperative", key="coop_leave", on_click=leave_coop)
             else:
                 prof = get_profile()
